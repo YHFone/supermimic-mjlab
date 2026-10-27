@@ -109,9 +109,14 @@ hardest clips by anchor error are `sprint1_subject4` (0.201 m), `run2_subject1` 
 
 ![SuperMimic on LAFAN1 dance: white policy, blue reference ghost](docs/assets/lafan1_dance_ghost.gif)
 
-*`dance1_subject1`, 5 s excerpt. White: the policy. Blue: a translucent ghost of the reference
-motion, rendered from the motion library and composited with a segmentation mask so both
-skeletons share one camera.*
+*`dance1_subject1`, 5 s excerpt (22k checkpoint). White: the policy. Blue: a translucent ghost of
+the reference motion, rendered from the motion library and composited with a segmentation mask
+so both skeletons share one camera.*
+
+A full **60 s 1080p** clip with the 24k checkpoint is here:
+[`docs/assets/lafan1_dance_60s_24k_1080p.mp4`](docs/assets/lafan1_dance_60s_24k_1080p.mp4)
+(1920×1080, 25 fps, H.264). GitHub does not embed video in Markdown, so it is linked rather than
+shown; the same ghost compositing is used.
 
 ## Documentation
 
