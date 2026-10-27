@@ -86,6 +86,33 @@ Every algorithm hyperparameter is a `--sm.<field>` override; the full list is in
 [`algo/config.py`](src/supermimic/algo/config.py). The G1 defaults are in
 [`config/g1/rl_cfg.py`](src/supermimic/config/g1/rl_cfg.py).
 
+## Results
+
+Checkpoint at 22k iterations (LAFAN1 40-clip subset), evaluated deterministically on all 40
+clips: one 60 s rollout per clip, no domain randomization, no observation noise, single
+RTX 4090.
+
+| Metric | Value |
+|---|---|
+| Clips evaluated | 40 (one rollout each, 60 s) |
+| Success rate | **40/40** (no fall / anchor terminations) |
+| Mean normalized return | **0.895** |
+| Mean anchor position error | **8.1 cm** |
+| Mean anchor rotation error | **0.053 rad** (≈ 3.0°) |
+| Rollout speed | 75 steps/s with 40 environments |
+
+Normalized return is the undiscounted episode return divided by the largest attainable value,
+as in the paper (per-step ceiling 0.1). Per-clip records are in
+[`docs/results/lafan1_40_eval_0022000.json`](docs/results/lafan1_40_eval_0022000.json); the
+hardest clips by anchor error are `sprint1_subject4` (0.201 m), `run2_subject1` (0.197 m) and
+`fallAndGetUp1_subject5` (0.172 m).
+
+![SuperMimic on LAFAN1 dance: white policy, blue reference ghost](docs/assets/lafan1_dance_ghost.gif)
+
+*`dance1_subject1`, 5 s excerpt. White: the policy. Blue: a translucent ghost of the reference
+motion, rendered from the motion library and composited with a segmentation mask so both
+skeletons share one camera.*
+
 ## Documentation
 
 - [`docs/training.rst`](docs/training.rst) — full training guide (data pipeline, spaces,

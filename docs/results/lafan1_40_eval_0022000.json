@@ -1,0 +1,378 @@
+{
+  "summary": {
+    "checkpoint": "logs/supermimic/g1_lafan1_40/checkpoint_0022000.pt",
+    "episodes": 40,
+    "success_rate": 1.0,
+    "failed_episodes": 0,
+    "mean_return": 268.55912895202636,
+    "mean_normalized_return": 0.8951970965067545,
+    "mean_episode_steps": 3000.0,
+    "mean_error_anchor_pos": 0.08050160808563232,
+    "mean_error_anchor_rot": 0.052553555234273276,
+    "steps": 3000,
+    "wall_clock_s": 40.0,
+    "steps_per_s": 75.1
+  },
+  "episodes": [
+    {
+      "env": 0,
+      "clip": "dance2_subject2",
+      "return": 275.05902099609375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06075137837727865,
+      "error_anchor_rot": 0.045051498413085936
+    },
+    {
+      "env": 1,
+      "clip": "walk1_subject5",
+      "return": 273.3746337890625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.08374720764160157,
+      "error_anchor_rot": 0.04691566467285156
+    },
+    {
+      "env": 2,
+      "clip": "run1_subject5",
+      "return": 231.09368896484375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.16554257202148437,
+      "error_anchor_rot": 0.0788611806233724
+    },
+    {
+      "env": 3,
+      "clip": "walk3_subject1",
+      "return": 291.03515625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.03420675150553385,
+      "error_anchor_rot": 0.026170560201009115
+    },
+    {
+      "env": 4,
+      "clip": "fallAndGetUp1_subject5",
+      "return": 218.04849243164062,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.17163535563151042,
+      "error_anchor_rot": 0.11669036865234375
+    },
+    {
+      "env": 5,
+      "clip": "walk1_subject5",
+      "return": 273.2014465332031,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.08678490193684896,
+      "error_anchor_rot": 0.04666369120279948
+    },
+    {
+      "env": 6,
+      "clip": "jumps1_subject5",
+      "return": 262.176025390625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.0709496561686198,
+      "error_anchor_rot": 0.059277608235677084
+    },
+    {
+      "env": 7,
+      "clip": "jumps1_subject5",
+      "return": 262.4976806640625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06939203898111979,
+      "error_anchor_rot": 0.05923405456542969
+    },
+    {
+      "env": 8,
+      "clip": "fight1_subject3",
+      "return": 268.561279296875,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.04804155476888021,
+      "error_anchor_rot": 0.04909563700358073
+    },
+    {
+      "env": 9,
+      "clip": "walk1_subject2",
+      "return": 290.3955078125,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.03999469248453776,
+      "error_anchor_rot": 0.028370218912760415
+    },
+    {
+      "env": 10,
+      "clip": "dance2_subject1",
+      "return": 260.136474609375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06959183756510416,
+      "error_anchor_rot": 0.05558290100097656
+    },
+    {
+      "env": 11,
+      "clip": "dance2_subject2",
+      "return": 275.33935546875,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06016364034016927,
+      "error_anchor_rot": 0.04515110778808594
+    },
+    {
+      "env": 12,
+      "clip": "walk1_subject2",
+      "return": 290.4512939453125,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.03976488494873047,
+      "error_anchor_rot": 0.02845781453450521
+    },
+    {
+      "env": 13,
+      "clip": "dance2_subject3",
+      "return": 284.916015625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.041282330830891924,
+      "error_anchor_rot": 0.03822533925374349
+    },
+    {
+      "env": 14,
+      "clip": "walk2_subject3",
+      "return": 288.8531494140625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.041576471964518226,
+      "error_anchor_rot": 0.04099121602376302
+    },
+    {
+      "env": 15,
+      "clip": "jumps1_subject5",
+      "return": 262.476806640625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06567366536458333,
+      "error_anchor_rot": 0.059555348714192706
+    },
+    {
+      "env": 16,
+      "clip": "jumps1_subject5",
+      "return": 261.83953857421875,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07054586791992187,
+      "error_anchor_rot": 0.05945374552408854
+    },
+    {
+      "env": 17,
+      "clip": "dance1_subject1",
+      "return": 265.6006164550781,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07139910380045573,
+      "error_anchor_rot": 0.05299995930989583
+    },
+    {
+      "env": 18,
+      "clip": "walk2_subject4",
+      "return": 291.1282958984375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.03757581583658854,
+      "error_anchor_rot": 0.035259747823079425
+    },
+    {
+      "env": 19,
+      "clip": "dance2_subject3",
+      "return": 284.8464660644531,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.040866612752278646,
+      "error_anchor_rot": 0.038308469136555987
+    },
+    {
+      "env": 20,
+      "clip": "dance1_subject1",
+      "return": 265.0401916503906,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07373391723632812,
+      "error_anchor_rot": 0.053851470947265626
+    },
+    {
+      "env": 21,
+      "clip": "fightAndSports1_subject1",
+      "return": 240.01193237304688,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.13342791748046876,
+      "error_anchor_rot": 0.095857177734375
+    },
+    {
+      "env": 22,
+      "clip": "walk3_subject5",
+      "return": 272.747802734375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07888674418131511,
+      "error_anchor_rot": 0.05397321065266927
+    },
+    {
+      "env": 23,
+      "clip": "walk3_subject1",
+      "return": 291.0191955566406,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.0342072016398112,
+      "error_anchor_rot": 0.026320454915364583
+    },
+    {
+      "env": 24,
+      "clip": "fallAndGetUp3_subject1",
+      "return": 252.6168670654297,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.08521041870117188,
+      "error_anchor_rot": 0.07318553161621094
+    },
+    {
+      "env": 25,
+      "clip": "sprint1_subject2",
+      "return": 258.9216003417969,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.1450123799641927,
+      "error_anchor_rot": 0.05292048136393229
+    },
+    {
+      "env": 26,
+      "clip": "walk3_subject3",
+      "return": 289.92724609375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.0376925786336263,
+      "error_anchor_rot": 0.03311754353841146
+    },
+    {
+      "env": 27,
+      "clip": "run1_subject5",
+      "return": 233.14724731445312,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.14527557373046876,
+      "error_anchor_rot": 0.07810123697916667
+    },
+    {
+      "env": 28,
+      "clip": "walk3_subject5",
+      "return": 273.1369323730469,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07670289103190105,
+      "error_anchor_rot": 0.05372562154134115
+    },
+    {
+      "env": 29,
+      "clip": "walk3_subject5",
+      "return": 273.1128234863281,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07929704284667968,
+      "error_anchor_rot": 0.05371178181966146
+    },
+    {
+      "env": 30,
+      "clip": "dance2_subject1",
+      "return": 258.4490051269531,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.08017789713541666,
+      "error_anchor_rot": 0.05735834248860677
+    },
+    {
+      "env": 31,
+      "clip": "walk3_subject2",
+      "return": 289.43206787109375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.05349921671549479,
+      "error_anchor_rot": 0.033508527119954425
+    },
+    {
+      "env": 32,
+      "clip": "sprint1_subject2",
+      "return": 259.2643737792969,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.131019287109375,
+      "error_anchor_rot": 0.05331827799479167
+    },
+    {
+      "env": 33,
+      "clip": "run2_subject1",
+      "return": 239.1218719482422,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.19722770182291666,
+      "error_anchor_rot": 0.07910324605305989
+    },
+    {
+      "env": 34,
+      "clip": "walk1_subject5",
+      "return": 275.07501220703125,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.07941433207194011,
+      "error_anchor_rot": 0.04571266174316406
+    },
+    {
+      "env": 35,
+      "clip": "sprint1_subject4",
+      "return": 242.2452850341797,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.20112158203125,
+      "error_anchor_rot": 0.07255612691243489
+    },
+    {
+      "env": 36,
+      "clip": "walk2_subject4",
+      "return": 290.8367614746094,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.04025841267903646,
+      "error_anchor_rot": 0.03608498382568359
+    },
+    {
+      "env": 37,
+      "clip": "dance2_subject2",
+      "return": 275.8813171386719,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.058177642822265625,
+      "error_anchor_rot": 0.04526800537109375
+    },
+    {
+      "env": 38,
+      "clip": "jumps1_subject5",
+      "return": 262.0035400390625,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.06644657897949219,
+      "error_anchor_rot": 0.060684870402018226
+    },
+    {
+      "env": 39,
+      "clip": "walk3_subject2",
+      "return": 289.3431396484375,
+      "steps": 3000,
+      "failed": false,
+      "error_anchor_pos": 0.053788665771484376,
+      "error_anchor_rot": 0.03346652475992839
+    }
+  ]
+}
