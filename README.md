@@ -42,7 +42,7 @@ Requires Python ≥ 3.10 and a CUDA GPU for the MuJoCo Warp simulator (CPU smoke
 too, but training does not).
 
 ```bash
-git clone https://github.com/yinhoufangone-source/supermimic-mjlab
+git clone https://github.com/YHFone/supermimic-mjlab
 cd supermimic-mjlab
 pip install -e ".[dev]"        # or: uv pip install -e ".[dev]"
 ```
