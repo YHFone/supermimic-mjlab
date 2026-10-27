@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Training artifacts
+logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.npz
+
+# Data
+data/
+motion_data/
+*.csv
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

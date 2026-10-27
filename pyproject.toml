@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "supermimic-mjlab"
+version = "0.1.0"
+description = "SuperMimic: humanoid whole-body control with one differentiable world model, on mjlab / MuJoCo Warp."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "The SuperMimic-mjlab Developers"}]
+requires-python = ">=3.10"
+keywords = [
+  "humanoid",
+  "whole-body-control",
+  "model-based-rl",
+  "world-model",
+  "bptt",
+  "motion-tracking",
+  "mujoco",
+  "mjlab",
+]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "mjlab>=1.6.0",
+  "torch>=2.7.0",
+  "numpy",
+  "mujoco>=3.11",
+  "tyro>=1.0.1",
+  "tqdm",
+  "pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+supermimic-train = "supermimic.scripts.train:main"
+supermimic-play = "supermimic.scripts.play:main"
+supermimic-evaluate = "supermimic.scripts.evaluate:main"
+supermimic-preprocess = "supermimic.scripts.preprocess:main"
+supermimic-preprocess-lafan1 = "supermimic.scripts.preprocess_lafan1:main"
+
+[project.urls]
+Homepage = "https://supermimic.github.io"
+Paper = "https://arxiv.org/abs/2610.28480"
+Upstream = "https://github.com/mujocolab/mjlab"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/supermimic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["slow: end-to-end tests that need a CUDA GPU"]
+
+[tool.ruff]
+line-length = 88
+extend-exclude = ["docs"]
