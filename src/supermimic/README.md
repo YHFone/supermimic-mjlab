@@ -1,8 +1,9 @@
-# SuperMimic in mjlab
+# SuperMimic package
 
 An implementation of [SuperMimic: Scaling Humanoid Whole-Body Control with One
 Differentiable World Model](https://supermimic.github.io) on top of mjlab's
-MuJoCo Warp simulator.
+MuJoCo Warp simulator.  The project-level README lives in the repository root;
+this file documents the module layout.
 
 The training loop follows Algorithm A.1 of the paper: collect simulator
 transitions with action noise, fit a differentiable world model on short
@@ -12,8 +13,8 @@ critic by back-propagating an imagined return through the frozen world model.
 ## Quick start
 
 ```bash
-# From the repository root. The scripts use the active Python environment.
-pip install -e . --no-deps
+# From the repository root.
+pip install -e ".[dev]"
 
 # 1. Preprocess BONES-SEED G1 clips (1200 clips = 2.24 h).
 python -m supermimic.scripts.preprocess \
