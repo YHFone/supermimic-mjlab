@@ -42,6 +42,9 @@ class SuperMimicCfg:
   wm_batch_size: int = 2048
   wm_updates_per_iter: int = 10
   wm_hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
+  wm_term_hidden_dims: tuple[int, ...] = (256, 128)
+  wm_term_loss_weight: float = 1.0
+  """Weight of the termination BCE in the world-model loss (Eq. 1)."""
   wm_lr: float = 2.0e-4
   wm_grad_clip: float = 1.0
 
@@ -67,6 +70,12 @@ class SuperMimicCfg:
   # Normalizer updates.
   norm_interval: int = 10
   norm_batch_size: int = 65_536
+  critic_norm_batch_size: int = 8192
+  """Batch size for the critic input normalizer.
+
+  Smaller than ``norm_batch_size`` because each sample also gathers
+  ``goal_frames + 1`` reference frames from the motion library.
+  """
 
   # Schedule.
   num_iterations: int = 320_000

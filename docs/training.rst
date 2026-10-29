@@ -109,9 +109,11 @@ collected per update round (the reciprocal of the 0.4 update-to-data ratio),
 the trainer accumulates the 0.5 fractional step, so it collects 2 and 3 steps
 alternately and averages 2.5. The observation
 is the 93-dimensional Table A.1 vector with 10 frames of history; the goal is
-the K=10 future reference sequence; the root reward/termination is measured on
-the pelvis. Every field of ``SuperMimicCfg`` can still be overridden with
-``--sm.<field>``.
+the K=10 future reference sequence, 73 dimensions per frame (joint positions
+and velocities, anchor position and orientation, plus the reference root's
+linear and angular velocity in the reference frame); the root
+reward/termination is measured on the pelvis. Every field of
+``SuperMimicCfg`` can still be overridden with ``--sm.<field>``.
 
 ``policy_chunk_size`` (default 4,096) is not a paper parameter: it splits the
 4,096 imagined rollouts into gradient-accumulation chunks so that the

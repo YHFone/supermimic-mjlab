@@ -103,3 +103,55 @@ def test_actor_normalizes_obs_per_frame_and_goal():
   )
   action = model.act(torch.randn(2, 30), torch.randn(2, 7))
   assert action.shape == (2, 2)
+
+
+def test_critic_normalizes_its_input():
+  cfg = ActorCriticCfg(
+    obs_dim=30,
+    goal_dim=7,
+    state_dim=15,
+    context_dim=3,
+    action_dim=2,
+    critic_goal_dim=7,
+    history_len=10,
+    encoder_hidden=(16,),
+    decoder_hidden=(16,),
+    critic_hidden=(8,),
+  )
+  model = ActorCritic(cfg)
+  # One statistic per concatenated (state, goal, context) entry.
+  assert model.critic_norm.mean.shape == (15 + 7 + 3,)
+  model.critic_norm.update(torch.ones(7, 15 + 7 + 3))
+  ones = torch.ones(2, 15 + 7 + 3)
+  state, goal, context = ones[:, :15], ones[:, 15:22], ones[:, 22:]
+  # A constant input normalizes to zero, so the critic sees only its bias.
+  expected = model.critic(torch.zeros(2, 15 + 7 + 3)).squeeze(-1)
+  assert torch.allclose(model.value(state, goal, context), expected, atol=1e-5)
+  model.value(state, goal, context).sum().backward()
+  assert any(p.grad is not None for p in model.critic.parameters())
+
+
+def test_termination_head_is_a_differentiable_probability():
+  cfg = WorldModelCfg(
+    state_dim=15,
+    action_dim=2,
+    context_dim=3,
+    goal_dim=7,
+    hidden_dims=(8,),
+    termination_hidden=(16,),
+  )
+  model = WorldModel(cfg)
+  state = torch.randn(5, 15, requires_grad=True)
+  goal = torch.randn(5, 7)
+  prob = model.termination_prob(state, goal)
+  assert prob.shape == (5,)
+  assert bool((prob >= 0).all() and (prob <= 1).all())
+  # A freshly initialized head must not output d_hat ~ 0.5, which would shrink
+  # the survival product and with it the imagined horizon to a couple of steps.
+  assert prob.detach().mean().item() < 0.2
+  loss = model.termination_loss(
+    state, goal, torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0])
+  )
+  loss.backward()
+  assert state.grad is not None
+  assert float(state.grad.abs().sum()) > 0.0

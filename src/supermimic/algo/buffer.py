@@ -23,6 +23,9 @@ class ReplayBuffer:
     self.contexts = torch.zeros(num_envs, capacity, context_dim, device=self.device)
     self.rewards = torch.zeros(num_envs, capacity, device=self.device)
     self.dones = torch.zeros(num_envs, capacity, dtype=torch.bool, device=self.device)
+    self.terminations = torch.zeros(
+      num_envs, capacity, dtype=torch.bool, device=self.device
+    )
     self.clip_ids = torch.zeros(
       num_envs, capacity, dtype=torch.int32, device=self.device
     )
@@ -45,6 +48,7 @@ class ReplayBuffer:
     context: torch.Tensor,
     clip_id: torch.Tensor,
     time_step: torch.Tensor,
+    terminated: torch.Tensor | None = None,
   ) -> None:
     idx = self.ptr
     env_ids = torch.arange(self.num_envs, device=self.device)
@@ -53,6 +57,8 @@ class ReplayBuffer:
     self.contexts[env_ids, idx] = context
     self.rewards[env_ids, idx] = reward
     self.dones[env_ids, idx] = done
+    # Hard simulator termination (height/tilt), as opposed to a time-out.
+    self.terminations[env_ids, idx] = done if terminated is None else terminated
     self.clip_ids[env_ids, idx] = clip_id.to(torch.int32)
     self.time_steps[env_ids, idx] = time_step
     self.ptr = (self.ptr + 1) % self.capacity
@@ -140,5 +146,8 @@ class ReplayBuffer:
       "state": self.states[env_ids, pos],
       "action": self.actions[env_ids, pos],
       "context": self.contexts[env_ids, pos],
+      "clip_ids": self.clip_ids[env_ids, pos].long(),
+      "time_steps": self.time_steps[env_ids, pos],
+      "terminated": self.terminations[env_ids, pos],
       "live": live,
     }

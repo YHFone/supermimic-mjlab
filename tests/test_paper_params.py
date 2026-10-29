@@ -109,8 +109,8 @@ def test_table_a4_dimensions():
   proprio = ProprioFeatures(29, default_joint_pos=torch.zeros(29))
   assert proprio.dim == 93
   goal = GoalFeatures(29, torch.zeros(29), anchor_index=0, horizon=10)
-  assert goal.frame_dim == 67
-  assert goal.dim == 670
+  assert goal.frame_dim == 73
+  assert goal.dim == 730
   assert WorldModelCfg().hidden_dims == (2048, 2048, 2048)
   assert WorldModelCfg().context_dim == 33
   assert ActorCriticCfg().context_dim == 33

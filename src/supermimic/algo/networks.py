@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -107,17 +108,22 @@ class WorldModelCfg:
   state_dim: int = 71
   action_dim: int = 29
   context_dim: int = 33
+  goal_dim: int = 730
   hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
+  termination_hidden: tuple[int, ...] = (256, 128)
   activation: str = "silu"
   output_gain: float = 0.01
 
 
 class WorldModel(nn.Module):
-  """Learned residual dynamics ``s_{t+1} = f(s_t, a_t, xi)``.
+  """Learned residual dynamics ``s_{t+1} = f(s_t, a_t, xi)`` plus a termination head.
 
   The network predicts a residual for every state component except the root
   quaternion, for which it predicts an incremental rotation vector so that the
-  next quaternion stays on the unit sphere.
+  next quaternion stays on the unit sphere.  A small head maps ``(s, g)`` to the
+  logit of the termination probability ``d_hat(s, g)``; it is trained with BCE
+  on the simulator's termination labels and, unlike a thresholded analytic
+  test, is differentiable with respect to the state.
   """
 
   def __init__(self, cfg: WorldModelCfg) -> None:
@@ -126,6 +132,7 @@ class WorldModel(nn.Module):
     self.state_norm = RunningNorm(cfg.state_dim, frozen=tuple(range(3, 7)))
     self.action_norm = RunningNorm(cfg.action_dim)
     self.context_norm = RunningNorm(cfg.context_dim)
+    self.goal_norm = RunningNorm(cfg.goal_dim)
     self.num_joints = (cfg.state_dim - 13) // 2
     self.out_dim = (cfg.state_dim - 4) + 3
     self.net = _mlp(
@@ -135,6 +142,17 @@ class WorldModel(nn.Module):
       cfg.activation,
       output_gain=cfg.output_gain,
     )
+    self.term_net = _mlp(
+      cfg.state_dim + cfg.goal_dim,
+      cfg.termination_hidden,
+      1,
+      cfg.activation,
+    )
+    # A randomly initialized head outputs d_hat ~ 0.5, so the survival product
+    # 0.5**t would cut the effective imagination horizon to a couple of steps
+    # while BCE slowly moves the logit towards the (low) base rate.  Start the
+    # bias at a 5% termination prior instead; the head still learns from BCE.
+    nn.init.constant_(self.term_net[-1].bias, math.log(0.05 / 0.95))
 
   def forward(
     self, state: torch.Tensor, action: torch.Tensor, context: torch.Tensor
@@ -172,6 +190,25 @@ class WorldModel(nn.Module):
     self.action_norm.update(action)
     self.context_norm.update(context)
 
+  def termination_logits(self, state: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+    x = torch.cat(
+      [self.state_norm.normalize(state), self.goal_norm.normalize(goal)], dim=-1
+    )
+    return self.term_net(x).squeeze(-1)
+
+  def termination_prob(self, state: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+    """Differentiable termination probability ``d_hat(s, g)`` in ``[0, 1]``."""
+    return torch.sigmoid(self.termination_logits(state, goal))
+
+  def termination_loss(
+    self, state: torch.Tensor, goal: torch.Tensor, label: torch.Tensor
+  ) -> torch.Tensor:
+    """BCE of ``d_hat`` against the simulator's ``{0, 1}`` termination label."""
+    logits = self.termination_logits(state, goal)
+    return torch.nn.functional.binary_cross_entropy_with_logits(
+      logits, label.float()
+    )
+
   def state_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Scale-aware state loss with a sign-invariant quaternion term."""
     pred_n = self.state_norm.normalize(predicted)
@@ -190,11 +227,11 @@ class WorldModel(nn.Module):
 @dataclass
 class ActorCriticCfg:
   obs_dim: int = 930
-  goal_dim: int = 670
+  goal_dim: int = 730
   state_dim: int = 71
   context_dim: int = 33
   action_dim: int = 29
-  critic_goal_dim: int = 670
+  critic_goal_dim: int = 730
   latent_dim: int = 32
   history_len: int = 10
   encoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
@@ -209,7 +246,9 @@ class ActorCritic(nn.Module):
 
   The observation and goal are normalized with running statistics before the
   actor: the observation normalizer is per frame, with statistics shared across
-  the history window, matching the original SuperMimic implementation.
+  the history window, matching the original SuperMimic implementation.  The
+  critic normalizes its ``(state, goal, context)`` input as a whole, so that
+  meters, radians, and rad/s enter the first layer at comparable scales.
   """
 
   def __init__(self, cfg: ActorCriticCfg) -> None:
@@ -221,6 +260,9 @@ class ActorCritic(nn.Module):
       )
     self.obs_norm = RunningNorm(cfg.obs_dim // cfg.history_len)
     self.goal_norm = RunningNorm(cfg.goal_dim)
+    self.critic_norm = RunningNorm(
+      cfg.state_dim + cfg.critic_goal_dim + cfg.context_dim
+    )
     self.encoder = _mlp(
       cfg.goal_dim, cfg.encoder_hidden, cfg.latent_dim, cfg.activation
     )
@@ -248,4 +290,5 @@ class ActorCritic(nn.Module):
   def value(
     self, state: torch.Tensor, goal: torch.Tensor, context: torch.Tensor
   ) -> torch.Tensor:
-    return self.critic(torch.cat([state, goal, context], dim=-1)).squeeze(-1)
+    x = torch.cat([state, goal, context], dim=-1)
+    return self.critic(self.critic_norm(x)).squeeze(-1)

@@ -115,14 +115,14 @@ class MotionLibraryCommand(CommandTerm):
     return self.goal()
 
   def goal(self) -> torch.Tensor:
-    # One extra frame: the reference at ``t - 1`` anchors the position term,
-    # and frames ``t .. t + K - 1`` are the goal window.  Orientations stay
-    # relative to the robot's current root.
+    # One extra frame: the current reference frame ``t`` anchors the position
+    # term, and frames ``t + 1 .. t + K`` are the goal window.  Orientations
+    # stay relative to the robot's current root.
     reference = self.library.gather(
       self.clip_ids,
       self.time_steps,
       self.cfg.goal_frames + 1,
-      offset=-1,
+      offset=0,
     )
     return self.goal_features.from_reference(
       reference, self.robot.data.root_link_quat_w

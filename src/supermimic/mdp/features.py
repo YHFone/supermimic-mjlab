@@ -29,6 +29,8 @@ JOINT_POS = slice(13, None)  # Joint slice end is set by the robot.
 # Goal layout: per reference frame.
 GOAL_ANCHOR_POS = 3
 GOAL_ANCHOR_ORI = 6
+GOAL_LIN_VEL = 3
+GOAL_ANG_VEL = 3
 
 
 @dataclass(frozen=True)
@@ -107,9 +109,11 @@ class GoalFeatures:
   """Builds the K-frame future-reference goal used by the goal encoder.
 
   The anchor *position* is expressed in the reference's own local frame: frame
-  0 of the gathered window (the reference frame preceding the goal window)
-  supplies the origin.  The anchor *orientation* stays relative to the robot's
-  current root orientation.
+  0 of the gathered window (the current reference frame) supplies the origin.
+  The anchor *orientation* stays relative to the robot's current root
+  orientation.  Each goal frame also carries the reference anchor's linear and
+  angular velocity in that frame, which gives the encoder feed-forward velocity
+  context (an addition relative to the paper's 67-dimensional layout).
   """
 
   def __init__(
@@ -123,7 +127,13 @@ class GoalFeatures:
     self.default_joint_pos = default_joint_pos
     self.anchor_index = anchor_index
     self.horizon = horizon
-    self.frame_dim = 2 * num_joints + GOAL_ANCHOR_POS + GOAL_ANCHOR_ORI
+    self.frame_dim = (
+      2 * num_joints
+      + GOAL_ANCHOR_POS
+      + GOAL_ANCHOR_ORI
+      + GOAL_LIN_VEL
+      + GOAL_ANG_VEL
+    )
     self.dim = horizon * self.frame_dim
 
   def from_reference(
@@ -131,18 +141,23 @@ class GoalFeatures:
   ) -> torch.Tensor:
     """Encode ``(B, K + 1, ...)`` reference frames as the goal.
 
-    Frame 0 is the reference frame preceding the goal window (``t - 1``) and
-    anchors the position term: frames ``1..K`` are the K goal frames, whose
-    anchor positions are relative to the reference anchor body at ``t - 1`` and
-    expressed in its frame.  The anchor orientations are relative to
-    ``root_quat``, the robot's current root orientation.
+    Frame 0 is the current reference frame (``t``) and anchors the position
+    term: frames ``1..K`` are the goal frames ``t + 1 .. t + K``, whose anchor
+    positions are relative to the reference anchor body at ``t`` and expressed
+    in its frame.  The anchor orientations are relative to ``root_quat``, the
+    robot's current root orientation.  Each goal frame also carries the
+    reference anchor's linear and angular velocity in that frame.
     """
     ref_pos = reference["body_pos"][:, :, self.anchor_index]  # (B, K + 1, 3)
     ref_quat = reference["body_quat"][:, :, self.anchor_index]  # (B, K + 1, 4)
+    ref_lin_vel = reference["body_lin_vel"][:, :, self.anchor_index]
+    ref_ang_vel = reference["body_ang_vel"][:, :, self.anchor_index]
     pos_origin = ref_pos[:, 0]
     pos_origin_quat = ref_quat[:, 0]
     ref_pos = ref_pos[:, 1:]
     ref_quat = ref_quat[:, 1:]
+    ref_lin_vel = ref_lin_vel[:, 1:]
+    ref_ang_vel = ref_ang_vel[:, 1:]
     batch, horizon = ref_pos.shape[0], ref_pos.shape[1]
 
     pos_origin_e = pos_origin[:, None, :]
@@ -153,11 +168,21 @@ class GoalFeatures:
     root_quat_e = root_quat[:, None, :].expand(batch, horizon, 4)
     anchor_quat_b = quat_mul(quat_inv(root_quat_e), ref_quat)
     anchor_ori_b = matrix_from_quat(anchor_quat_b)[..., :2].reshape(batch, horizon, 6)
+    lin_vel_b = quat_apply_inverse(ref_quat, ref_lin_vel)
+    ang_vel_b = quat_apply_inverse(ref_quat, ref_ang_vel)
     joint_pos = (
       reference["joint_pos"][:, 1:] - self.default_joint_pos[None, None, :]
     )
     goal = torch.cat(
-      [joint_pos, reference["joint_vel"][:, 1:], anchor_pos_b, anchor_ori_b], dim=-1
+      [
+        joint_pos,
+        reference["joint_vel"][:, 1:],
+        anchor_pos_b,
+        anchor_ori_b,
+        lin_vel_b,
+        ang_vel_b,
+      ],
+      dim=-1,
     )
     return goal.reshape(batch, self.dim)
 

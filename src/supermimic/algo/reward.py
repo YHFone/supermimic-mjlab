@@ -1,4 +1,4 @@
-"""Differentiable motion-tracking reward and termination.
+"""Differentiable motion-tracking reward.
 
 The terms follow BeyondMimic's tracking reward as instantiated by mjlab, with
 the two changes SuperMimic makes (Appendix A of the paper): the self-collision
@@ -18,7 +18,6 @@ from torch import nn
 
 from mjlab.utils.lab_api.math import (
   quat_apply,
-  quat_apply_inverse,
   quat_inv,
   quat_mul,
   yaw_quat,
@@ -227,65 +226,3 @@ class TrackingReward(nn.Module):
       "action_rate": cfg.action_rate_weight * terms["action_rate"] * cfg.dt,
       "joint_limit": cfg.joint_limit_weight * terms["joint_limit"] * cfg.dt,
     }
-
-
-@dataclass(frozen=True)
-class TrackingTerminationCfg:
-  """Termination thresholds of Appendix A."""
-
-  pos_threshold: float = 0.25
-  ori_threshold: float = 0.8
-  soft_tau: float = 0.02
-
-
-class TrackingTermination(nn.Module):
-  """Anchor height/tilt termination with a differentiable probability."""
-
-  def __init__(
-    self,
-    kinematics: DifferentiableKinematics,
-    tracked_body_indices: torch.Tensor,
-    anchor_index: int,
-    cfg: TrackingTerminationCfg | None = None,
-  ) -> None:
-    super().__init__()
-    self.kinematics = kinematics
-    self.cfg = cfg or TrackingTerminationCfg()
-    self.register_buffer("tracked_body_indices", tracked_body_indices.clone())
-    self.anchor_index = anchor_index
-    self.register_buffer("gravity_w", torch.tensor([0.0, 0.0, -1.0]).unsqueeze(0))
-
-  def forward(
-    self, state: torch.Tensor, reference: dict[str, torch.Tensor]
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    num_joints = (state.shape[-1] - 13) // 2
-    body_pos, body_quat = self.kinematics(
-      state[:, 0:3],
-      state[:, 3:7],
-      state[:, 13 : 13 + num_joints],
-    )
-    ids = self.tracked_body_indices
-    anchor_pos = body_pos[:, ids][:, self.anchor_index]
-    anchor_quat = body_quat[:, ids][:, self.anchor_index]
-    return self.forward_from_anchor(anchor_pos, anchor_quat, reference)
-
-  def forward_from_anchor(
-    self,
-    anchor_pos: torch.Tensor,
-    anchor_quat: torch.Tensor,
-    reference: dict[str, torch.Tensor],
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Binary termination from an already-computed root anchor pose."""
-    ref_anchor_pos = reference["body_pos"][:, self.anchor_index]
-    ref_anchor_quat = reference["body_quat"][:, self.anchor_index]
-
-    pos_err = torch.abs(anchor_pos[:, 2] - ref_anchor_pos[:, 2])
-    gravity_w = self.gravity_w.expand(anchor_pos.shape[0], 3)
-    ref_gravity_z = quat_apply_inverse(ref_anchor_quat, gravity_w)[:, 2]
-    robot_gravity_z = quat_apply_inverse(anchor_quat, gravity_w)[:, 2]
-    ori_err = torch.abs(ref_gravity_z - robot_gravity_z)
-
-    hard = (pos_err > self.cfg.pos_threshold) | (ori_err > self.cfg.ori_threshold)
-    # The paper's d_t is a discrete event: detach the 0/1 probability so the
-    # survival product c_t in Eq. 2 carries no gradient through the test.
-    return hard, hard.to(anchor_pos.dtype)
