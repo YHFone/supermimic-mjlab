@@ -183,13 +183,22 @@ The world model and actor are saved as ``checkpoint_<iteration>.pt`` and
 ``checkpoint_final.pt``. Ctrl+C saves ``checkpoint_interrupt.pt``. Logs are
 printed as an rsl-rl-style table and written to TensorBoard.
 
+Each run writes to its own timestamped directory,
+``<log-dir>/<experiment-name>/<YYYY-MM-DD_HH-MM-SS>/`` (for example
+``logs/supermimic/g1_supermimic/2026-10-29_15-04-05/``), so repeated runs never
+share TensorBoard event files. Point TensorBoard at the parent:
+
+.. code-block:: bash
+
+   tensorboard --logdir logs/supermimic
+
 Play and visualize
 ------------------
 
 .. code-block:: bash
 
    python -m supermimic.scripts.play \
-       --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+       --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
        --motion-dir /data/supermimic/g1_1200 \
        --viewer viser --viser-port 8091
 
@@ -216,7 +225,7 @@ Evaluation
 .. code-block:: bash
 
    python -m supermimic.scripts.evaluate \
-       --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+       --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
        --motion-dir /data/supermimic/g1_1200 \
        --num-envs 64 --episodes-per-env 4
 

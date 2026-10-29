@@ -30,13 +30,13 @@ python -m supermimic.scripts.train \
 # 3. Watch the policy (Viser on http://localhost:8091). The viewer overlays a
 #    translucent reference robot; toggle it under "SuperMimic reference".
 python -m supermimic.scripts.play \
-    --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+    --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
     --motion-dir /path/to/supermimic/g1_1200 \
     --viewer viser --viser-port 8091
 
 # 4. Evaluate deterministically, one rollout per motion.
 python -m supermimic.scripts.evaluate \
-    --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+    --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
     --motion-dir /path/to/supermimic/g1_1200 \
     --num-envs 64 --episodes-per-env 4
 ```

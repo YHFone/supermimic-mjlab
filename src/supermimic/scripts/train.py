@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import tyro
@@ -59,6 +60,12 @@ def resolve_motion_files(args: TrainArgs) -> tuple[str, ...]:
   return find_motion_files(args.motion_dir, args.motion_files)
 
 
+def timestamped_name(name: str, when: datetime | None = None) -> str:
+  """Append a run timestamp so each training run gets its own log directory."""
+  stamp = (when or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+  return f"{name}/{stamp}"
+
+
 def main() -> None:
   args = tyro.cli(TrainArgs)
   configure_torch_backends()
@@ -75,7 +82,8 @@ def main() -> None:
   cfg.device = args.device
   cfg.seed = args.seed
   cfg.log_dir = args.log_dir
-  cfg.experiment_name = args.experiment_name
+  cfg.experiment_name = timestamped_name(args.experiment_name)
+  print(f"[INFO] Logging to {Path(cfg.log_dir) / cfg.experiment_name}", flush=True)
   if cfg.lr_decay_iters > cfg.num_iterations:
     print(
       f"[INFO] lr_decay_iters={cfg.lr_decay_iters} > num_iterations="

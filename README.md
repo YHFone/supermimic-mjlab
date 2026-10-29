@@ -70,14 +70,14 @@ Watch the policy (Viser at <http://localhost:8091>; the reference robot is overl
 toggled under "SuperMimic reference"):
 
 ```bash
-supermimic-play --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+supermimic-play --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
                 --motion-dir ~/motion_data/supermimic/g1_1200 --viewer viser
 ```
 
 Evaluate deterministically, one rollout per motion:
 
 ```bash
-supermimic-evaluate --checkpoint logs/supermimic/g1_supermimic/checkpoint_final.pt \
+supermimic-evaluate --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
                     --motion-dir ~/motion_data/supermimic/g1_1200 \
                     --num-envs 64 --episodes-per-env 4
 ```
