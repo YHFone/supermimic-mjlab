@@ -139,6 +139,7 @@ class SuperMimicTrainer:
         action_dim=self.spec.action_dim,
         critic_goal_dim=self.goal_dim,
         latent_dim=cfg.latent_dim,
+        history_len=self.history_len,
         encoder_hidden=cfg.encoder_hidden_dims,
         decoder_hidden=cfg.decoder_hidden_dims,
         critic_hidden=cfg.critic_hidden_dims,
@@ -241,6 +242,8 @@ class SuperMimicTrainer:
       obs = self.proprio(state, self.last_action, bias, add_noise=True)
       self.history = torch.cat([self.history[:, 1:], obs[:, None]], dim=1)
       goal = self.command.goal()
+      self.actor_critic.obs_norm.update(obs)
+      self.actor_critic.goal_norm.update(goal)
       action = self.actor_critic.act(self.history.reshape(self.env.num_envs, -1), goal)
       noisy_action = action + torch.randn_like(action) * self.cfg.action_noise
       clip_ids = self.command.clip_ids.clone()
@@ -578,10 +581,10 @@ class SuperMimicTrainer:
   def _goal_for(
     self, clip_ids: torch.Tensor, times: torch.Tensor, state: torch.Tensor
   ) -> torch.Tensor:
-    reference = self.library.gather(clip_ids, times, self.cfg.goal_frames)
-    return self.command.goal_features.from_reference(
-      reference, state[:, 0:3], state[:, 3:7]
+    reference = self.library.gather(
+      clip_ids, times, self.cfg.goal_frames + 1, offset=-1
     )
+    return self.command.goal_features.from_reference(reference, state[:, 3:7])
 
   def _update_critic(
     self,

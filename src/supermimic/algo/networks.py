@@ -196,6 +196,7 @@ class ActorCriticCfg:
   action_dim: int = 29
   critic_goal_dim: int = 670
   latent_dim: int = 32
+  history_len: int = 10
   encoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
   decoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
   critic_hidden: tuple[int, ...] = (256, 128)
@@ -204,11 +205,22 @@ class ActorCriticCfg:
 
 
 class ActorCritic(nn.Module):
-  """Deterministic goal-conditioned actor plus a state-goal critic."""
+  """Deterministic goal-conditioned actor plus a state-goal critic.
+
+  The observation and goal are normalized with running statistics before the
+  actor: the observation normalizer is per frame, with statistics shared across
+  the history window, matching the original SuperMimic implementation.
+  """
 
   def __init__(self, cfg: ActorCriticCfg) -> None:
     super().__init__()
     self.cfg = cfg
+    if cfg.obs_dim % cfg.history_len != 0:
+      raise ValueError(
+        f"obs_dim {cfg.obs_dim} is not divisible by history_len {cfg.history_len}"
+      )
+    self.obs_norm = RunningNorm(cfg.obs_dim // cfg.history_len)
+    self.goal_norm = RunningNorm(cfg.goal_dim)
     self.encoder = _mlp(
       cfg.goal_dim, cfg.encoder_hidden, cfg.latent_dim, cfg.activation
     )
@@ -227,7 +239,10 @@ class ActorCritic(nn.Module):
     )
 
   def act(self, obs: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
-    z = torch.tanh(self.encoder(goal))
+    batch = obs.shape[0]
+    obs = obs.reshape(batch, self.cfg.history_len, -1)
+    obs = self.obs_norm(obs).reshape(batch, -1)
+    z = torch.tanh(self.encoder(self.goal_norm(goal)))
     return self.decoder(torch.cat([z, obs], dim=-1))
 
   def value(

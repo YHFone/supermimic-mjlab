@@ -74,3 +74,32 @@ def test_actor_critic_shapes():
   assert value.shape == (5,)
   (action.sum() + value.sum()).backward()
   assert any(p.grad is not None for p in model.parameters())
+
+
+def test_actor_normalizes_obs_per_frame_and_goal():
+  cfg = ActorCriticCfg(
+    obs_dim=30,
+    goal_dim=7,
+    state_dim=15,
+    context_dim=3,
+    action_dim=2,
+    critic_goal_dim=7,
+    latent_dim=4,
+    history_len=10,
+    encoder_hidden=(16,),
+    decoder_hidden=(16,),
+    critic_hidden=(8,),
+  )
+  model = ActorCritic(cfg)
+  # One mean/var per frame dimension, shared across the 10 history frames.
+  assert model.obs_norm.mean.shape == (3,)
+  assert model.goal_norm.mean.shape == (7,)
+  model.obs_norm.update(torch.ones(7, 3))
+  model.goal_norm.update(torch.full((7, 7), 3.0))
+  normalized = model.obs_norm(torch.ones(2, 10, 3))
+  assert torch.allclose(normalized, torch.zeros(2, 10, 3), atol=1e-5)
+  assert torch.allclose(
+    model.goal_norm(torch.full((2, 7), 3.0)), torch.zeros(2, 7), atol=1e-5
+  )
+  action = model.act(torch.randn(2, 30), torch.randn(2, 7))
+  assert action.shape == (2, 2)

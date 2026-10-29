@@ -104,7 +104,13 @@ def _uniform(scale: float, like: torch.Tensor) -> torch.Tensor:
 
 
 class GoalFeatures:
-  """Builds the K-frame future-reference goal used by the goal encoder."""
+  """Builds the K-frame future-reference goal used by the goal encoder.
+
+  The anchor *position* is expressed in the reference's own local frame: frame
+  0 of the gathered window (the reference frame preceding the goal window)
+  supplies the origin.  The anchor *orientation* stays relative to the robot's
+  current root orientation.
+  """
 
   def __init__(
     self,
@@ -121,24 +127,37 @@ class GoalFeatures:
     self.dim = horizon * self.frame_dim
 
   def from_reference(
-    self,
-    reference: dict[str, torch.Tensor],
-    root_pos: torch.Tensor,
-    root_quat: torch.Tensor,
+    self, reference: dict[str, torch.Tensor], root_quat: torch.Tensor
   ) -> torch.Tensor:
-    """Encode ``(B, K, ...)`` reference frames relative to the current root."""
-    ref_pos = reference["body_pos"][:, :, self.anchor_index]  # (B, K, 3)
-    ref_quat = reference["body_quat"][:, :, self.anchor_index]  # (B, K, 4)
+    """Encode ``(B, K + 1, ...)`` reference frames as the goal.
+
+    Frame 0 is the reference frame preceding the goal window (``t - 1``) and
+    anchors the position term: frames ``1..K`` are the K goal frames, whose
+    anchor positions are relative to the reference anchor body at ``t - 1`` and
+    expressed in its frame.  The anchor orientations are relative to
+    ``root_quat``, the robot's current root orientation.
+    """
+    ref_pos = reference["body_pos"][:, :, self.anchor_index]  # (B, K + 1, 3)
+    ref_quat = reference["body_quat"][:, :, self.anchor_index]  # (B, K + 1, 4)
+    pos_origin = ref_pos[:, 0]
+    pos_origin_quat = ref_quat[:, 0]
+    ref_pos = ref_pos[:, 1:]
+    ref_quat = ref_quat[:, 1:]
     batch, horizon = ref_pos.shape[0], ref_pos.shape[1]
 
-    root_pos_e = root_pos[:, None, :]
+    pos_origin_e = pos_origin[:, None, :]
+    pos_origin_quat_e = pos_origin_quat[:, None, :].expand(batch, horizon, 4)
+    anchor_pos_b = quat_apply_inverse(
+      pos_origin_quat_e, ref_pos - pos_origin_e
+    )
     root_quat_e = root_quat[:, None, :].expand(batch, horizon, 4)
-    anchor_pos_b = quat_apply_inverse(root_quat_e, ref_pos - root_pos_e)
     anchor_quat_b = quat_mul(quat_inv(root_quat_e), ref_quat)
     anchor_ori_b = matrix_from_quat(anchor_quat_b)[..., :2].reshape(batch, horizon, 6)
-    joint_pos = reference["joint_pos"] - self.default_joint_pos[None, None, :]
+    joint_pos = (
+      reference["joint_pos"][:, 1:] - self.default_joint_pos[None, None, :]
+    )
     goal = torch.cat(
-      [joint_pos, reference["joint_vel"], anchor_pos_b, anchor_ori_b], dim=-1
+      [joint_pos, reference["joint_vel"][:, 1:], anchor_pos_b, anchor_ori_b], dim=-1
     )
     return goal.reshape(batch, self.dim)
 
