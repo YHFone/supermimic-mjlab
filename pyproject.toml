@@ -45,6 +45,8 @@ supermimic-play = "supermimic.scripts.play:main"
 supermimic-evaluate = "supermimic.scripts.evaluate:main"
 supermimic-preprocess = "supermimic.scripts.preprocess:main"
 supermimic-preprocess-lafan1 = "supermimic.scripts.preprocess_lafan1:main"
+supermimic-export-onnx = "supermimic.scripts.export_onnx:main"
+supermimic-export-motion = "supermimic.scripts.export_motion:main"
 
 [project.urls]
 Homepage = "https://supermimic.github.io"

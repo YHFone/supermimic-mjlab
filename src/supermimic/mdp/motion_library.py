@@ -32,7 +32,7 @@ class MotionLibrary:
     self.dt = 1.0 / 50.0
     self.clip_names: list[str] = []
     self.clip_lengths: list[int] = []
-    self.fps: float = 50.0
+    self.fps: float | None = None
 
     joint_pos, joint_vel = [], []
     body_pos, body_quat, body_lin_vel, body_ang_vel = [], [], [], []
@@ -50,7 +50,13 @@ class MotionLibrary:
           n = min(n, cfg.max_frames)
         self.clip_names.append(path.stem)
         self.clip_lengths.append(n)
-        self.fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+        file_fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+        if self.fps is None:
+          self.fps = file_fps
+        elif abs(file_fps - self.fps) > 1e-6:
+          raise ValueError(
+            f"Motion files mix {self.fps} and {file_fps} fps; resample first."
+          )
         joint_pos.append(torch.as_tensor(data["joint_pos"][:n], dtype=torch.float32))
         joint_vel.append(torch.as_tensor(data["joint_vel"][:n], dtype=torch.float32))
         body_pos.append(
@@ -68,6 +74,7 @@ class MotionLibrary:
 
     if not joint_pos:
       raise ValueError("MotionLibrary received no motion files.")
+    assert self.fps is not None
     self.dt = 1.0 / self.fps
     self.num_clips = len(self.clip_names)
     self.clip_lengths_t = torch.tensor(
@@ -135,6 +142,6 @@ class MotionLibrary:
     bin_size = max(1, round(bin_size_s / self.dt))
     return clip_ids, times // bin_size
 
-  @property
-  def max_bins(self) -> int:
-    return int(np.ceil(max(self.clip_lengths) * self.dt / 1.0))
+  def max_bins(self, bin_size_s: float = 1.0) -> int:
+    """Number of return bins per clip at ``bin_size_s`` seconds."""
+    return int(np.ceil(max(self.clip_lengths) * self.dt / bin_size_s))

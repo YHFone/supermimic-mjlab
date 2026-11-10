@@ -14,6 +14,8 @@ class ReplayBuffer:
     action_dim: int,
     context_dim: int,
     device: str | torch.device,
+    *,
+    terminal_capacity: int = 65_536,
   ) -> None:
     self.num_envs = num_envs
     self.capacity = capacity
@@ -34,6 +36,21 @@ class ReplayBuffer:
     )
     self.ptr = torch.zeros(num_envs, dtype=torch.long, device=self.device)
     self.count = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+    # Hard-terminal states s_{t+1}.  They are never stored in ``states`` (the
+    # env is reset before the next add), but the termination head needs positive
+    # examples of "this state is terminal" for Eq. 1/2/3.
+    self.terminal_capacity = int(terminal_capacity)
+    self.terminal_states = torch.zeros(
+      self.terminal_capacity, state_dim, device=self.device
+    )
+    self.terminal_clip_ids = torch.zeros(
+      self.terminal_capacity, dtype=torch.long, device=self.device
+    )
+    self.terminal_time_steps = torch.zeros(
+      self.terminal_capacity, dtype=torch.long, device=self.device
+    )
+    self.terminal_ptr = 0
+    self.terminal_count = 0
 
   @property
   def numel(self) -> int:
@@ -49,6 +66,7 @@ class ReplayBuffer:
     clip_id: torch.Tensor,
     time_step: torch.Tensor,
     terminated: torch.Tensor | None = None,
+    next_state: torch.Tensor | None = None,
   ) -> None:
     idx = self.ptr
     env_ids = torch.arange(self.num_envs, device=self.device)
@@ -65,6 +83,19 @@ class ReplayBuffer:
     self.count = torch.minimum(
       self.count + 1, torch.full_like(self.count, self.capacity)
     )
+    if next_state is not None and self.terminal_capacity > 0:
+      hard = done if terminated is None else terminated
+      ids = hard.nonzero(as_tuple=False).squeeze(-1)
+      if ids.numel() > 0:
+        n = ids.numel()
+        slots = (
+          self.terminal_ptr + torch.arange(n, device=self.device)
+        ) % self.terminal_capacity
+        self.terminal_states[slots] = next_state[ids]
+        self.terminal_clip_ids[slots] = clip_id[ids].long()
+        self.terminal_time_steps[slots] = time_step[ids].long() + 1
+        self.terminal_ptr = int((self.terminal_ptr + n) % self.terminal_capacity)
+        self.terminal_count = min(self.terminal_count + n, self.terminal_capacity)
 
   def _valid_len(self) -> torch.Tensor:
     return self.count
@@ -72,11 +103,13 @@ class ReplayBuffer:
   def sample_windows(
     self, batch_size: int, length: int, generator: torch.Generator | None = None
   ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample ``(env_id, end_position)`` pairs for valid windows.
+    """Sample ``(env_id, end_position)`` pairs for windows inside one episode.
 
     The returned position is the last state of the window, so
     ``gather_states(env_ids, positions, before=length - 1)`` yields the
-    window in chronological order.
+    window in chronological order.  Rows whose environment has no clean
+    window are dropped, so the returned batch can be shorter than
+    ``batch_size`` (or empty).
     """
     env_ids = torch.randint(
       0, self.num_envs, (batch_size,), device=self.device, generator=generator
@@ -94,7 +127,9 @@ class ReplayBuffer:
       if not bool(ok.any()):
         break
       max_start = (valid_len - length).clamp_min(0)
-      offset = (torch.rand(n, device=self.device) * (max_start + 1).float()).long()
+      offset = (
+        torch.rand(n, device=self.device, generator=generator) * (max_start + 1).float()
+      ).long()
       pos = (self.ptr[e] - valid_len + offset) % self.capacity
       offsets = torch.arange(length - 1, device=self.device)
       check = (pos[:, None] + offsets[None, :]) % self.capacity
@@ -103,9 +138,11 @@ class ReplayBuffer:
       positions[remaining] = torch.where(bad, positions[remaining], end)
       valid[remaining] = ~bad
     if not bool(valid.all()):
-      missing = (~valid).nonzero(as_tuple=False).squeeze(-1)
-      e = env_ids[missing]
-      positions[missing] = (self.ptr[e] - 1) % self.capacity
+      # Never return a window that crosses a reset: drop the rows instead
+      # (callers handle a shorter/empty batch).
+      keep = valid.nonzero(as_tuple=False).squeeze(-1)
+      env_ids = env_ids[keep]
+      positions = positions[keep]
     return env_ids, positions
 
   def sample_starts(
@@ -115,7 +152,10 @@ class ReplayBuffer:
       0, self.num_envs, (batch_size,), device=self.device, generator=generator
     )
     valid_len = self._valid_len()[env_ids].clamp_min(1)
-    offset = (torch.rand(batch_size, device=self.device) * valid_len.float()).long()
+    offset = (
+      torch.rand(batch_size, device=self.device, generator=generator)
+      * valid_len.float()
+    ).long()
     pos = (self.ptr[env_ids] - valid_len + offset) % self.capacity
     return {
       "env_ids": env_ids,
@@ -137,8 +177,31 @@ class ReplayBuffer:
       self.dones[env_ids[:, None], idx],
     )
 
-  def sample_random(self, n: int) -> dict[str, torch.Tensor]:
-    flat = torch.randint(0, self.num_envs * self.capacity, (n,), device=self.device)
+  def sample_terminal(
+    self, n: int, generator: torch.Generator | None = None
+  ) -> dict[str, torch.Tensor]:
+    """Hard-terminal states (label 1 for the termination head)."""
+    if self.terminal_count == 0 or n <= 0:
+      return {
+        "state": torch.zeros(0, self.terminal_states.shape[1], device=self.device),
+        "clip_ids": torch.zeros(0, dtype=torch.long, device=self.device),
+        "time_steps": torch.zeros(0, dtype=torch.long, device=self.device),
+      }
+    idx = torch.randint(
+      0, self.terminal_count, (n,), device=self.device, generator=generator
+    )
+    return {
+      "state": self.terminal_states[idx],
+      "clip_ids": self.terminal_clip_ids[idx],
+      "time_steps": self.terminal_time_steps[idx],
+    }
+
+  def sample_random(
+    self, n: int, generator: torch.Generator | None = None
+  ) -> dict[str, torch.Tensor]:
+    flat = torch.randint(
+      0, self.num_envs * self.capacity, (n,), device=self.device, generator=generator
+    )
     env_ids = flat // self.capacity
     pos = flat % self.capacity
     live = pos < self.count[env_ids]

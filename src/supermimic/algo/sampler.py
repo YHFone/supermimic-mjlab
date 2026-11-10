@@ -24,6 +24,7 @@ class ReturnBasedSampler:
   ) -> None:
     self.device = torch.device(device)
     self.dt = frame_dt
+    # Bin length in *frames* (not seconds); the trainer uses ``bin_frames``.
     self.bin_size = max(1, round(bin_size_s / frame_dt))
     self.max_return = max_return
     self.uniform_ratio = uniform_ratio
@@ -79,6 +80,11 @@ class ReturnBasedSampler:
     )
     return probs / probs.sum()
 
+  @property
+  def bin_frames(self) -> int:
+    """Bin length in clip/control frames (alias of :attr:`bin_size`)."""
+    return self.bin_size
+
   def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
     probs = self._probabilities
     probs = torch.nan_to_num(probs, nan=0.0)
@@ -101,12 +107,23 @@ class ReturnBasedSampler:
     if not bool(valid.any()):
       return
     bin_ids = bin_ids[valid]
-    values = returns[valid]
-    self.visits.index_add_(0, bin_ids, torch.ones_like(values))
+    values = returns[valid].float()
+    # Several environments (or several frames of one rollout) can land in the
+    # same bin.  ``index_copy_`` silently keeps one of them, so aggregate first
+    # and apply one EMA step per unique bin.
+    unique, inverse = torch.unique(bin_ids, return_inverse=True)
+    sums = torch.zeros(unique.numel(), device=self.device).index_add_(
+      0, inverse, values
+    )
+    counts = torch.zeros(unique.numel(), device=self.device).index_add_(
+      0, inverse, torch.ones_like(values)
+    )
+    means = sums / counts.clamp_min(1.0)
+    self.visits.index_add_(0, unique, counts)
     self.bin_returns.index_copy_(
       0,
-      bin_ids,
-      self.bin_returns[bin_ids] * (1.0 - self.ema) + values * self.ema,
+      unique,
+      self.bin_returns[unique] * (1.0 - self.ema) + means * self.ema,
     )
     self.past_weights = 0.9 * self.past_weights + 0.1 * self._softmax_weights()
     self._probabilities = self._compute_probabilities()

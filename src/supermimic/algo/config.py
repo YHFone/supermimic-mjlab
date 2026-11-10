@@ -44,7 +44,11 @@ class SuperMimicCfg:
   wm_hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   wm_term_hidden_dims: tuple[int, ...] = (256, 128)
   wm_term_loss_weight: float = 1.0
-  """Weight of the termination BCE in the world-model loss (Eq. 1)."""
+  """Weight of the termination BCE in the world-model loss (Eq. 1).
+
+  The state term is averaged over the k window steps, so the BCE is divided by
+  k as well; this keeps the paper's 1 : k relative weight between the two.
+  """
   wm_lr: float = 2.0e-4
   wm_grad_clip: float = 1.0
 

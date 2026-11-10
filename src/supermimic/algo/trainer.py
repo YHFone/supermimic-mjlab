@@ -37,6 +37,7 @@ from supermimic.algo.state import (
   StateExtractor,
   SuperMimicStateSpec,
   build_kinematics,
+  context_encoder_bias,
 )
 from supermimic.mdp.commands import MotionLibraryCommand
 from supermimic.mdp.features import ProprioFeatures, ProprioNoiseCfg
@@ -74,6 +75,15 @@ class SuperMimicTrainer:
     assert isinstance(command, MotionLibraryCommand)
     self.command: MotionLibraryCommand = command
     self.library = self.command.library
+    longest_clip_s = (
+      float(self.library.clip_lengths_t.max().item()) * self.library.dt
+    )
+    if longest_clip_s > env.max_episode_length_s + 1e-6:
+      print(
+        f"[WARN] episode_length_s={env.max_episode_length_s:.2f} < longest clip "
+        f"{longest_clip_s:.2f}s; the tail of long clips is only reachable via resets.",
+        flush=True,
+      )
     body_names = self.command.cfg.body_names
     self.spec = SuperMimicStateSpec.from_env(env, body_names)
     self.extractor = StateExtractor(env, self.spec)
@@ -200,7 +210,7 @@ class SuperMimicTrainer:
     self.env.reset()
     state = self.extractor.state()
     context = self.extractor.context()
-    bias = context[:, 2 : 2 + self.spec.num_joints]
+    bias = context_encoder_bias(context, self.spec.num_joints)
     obs = self.proprio(state, self.last_action, bias, add_noise=False)
     self.history[:] = obs[:, None, :].expand_as(self.history)
     self.episode_start_clip[:] = self.command.clip_ids
@@ -236,7 +246,7 @@ class SuperMimicTrainer:
     for _ in range(steps):
       state = self.extractor.state()
       context = self.extractor.context()
-      bias = context[:, 2 : 2 + self.spec.num_joints]
+      bias = context_encoder_bias(context, self.spec.num_joints)
       obs = self.proprio(state, self.last_action, bias, add_noise=True)
       self.history = torch.cat([self.history[:, 1:], obs[:, None]], dim=1)
       goal = self.command.goal()
@@ -244,7 +254,10 @@ class SuperMimicTrainer:
       self.actor_critic.goal_norm.update(goal)
       self.world_model.goal_norm.update(goal)
       action = self.actor_critic.act(self.history.reshape(self.env.num_envs, -1), goal)
-      noisy_action = action + torch.randn_like(action) * self.cfg.action_noise
+      noise = torch.randn(
+        action.shape, generator=self._rng, device=self.device, dtype=action.dtype
+      )
+      noisy_action = action + noise * self.cfg.action_noise
       clip_ids = self.command.clip_ids.clone()
       time_steps = self.command.time_steps.clone()
       _, _, terminated, truncated, _ = self.env.step(noisy_action)
@@ -263,6 +276,7 @@ class SuperMimicTrainer:
         clip_ids,
         time_steps,
         terminated=terminated,
+        next_state=next_state,
       )
       self.env_steps += self.env.num_envs
       rollout_rewards.append(reward.mean())
@@ -293,7 +307,7 @@ class SuperMimicTrainer:
         self.env.reset(env_ids=done_ids)
         new_state = self.extractor.state()[done_ids]
         new_context = self.extractor.context()[done_ids]
-        new_bias = new_context[:, 2 : 2 + self.spec.num_joints]
+        new_bias = context_encoder_bias(new_context, self.spec.num_joints)
         new_obs = self.proprio(
           new_state,
           torch.zeros_like(self.last_action[done_ids]),
@@ -316,7 +330,9 @@ class SuperMimicTrainer:
 
   def _finish_episodes(self, done_ids: torch.Tensor) -> None:
     cfg = self.cfg
-    bin_frames = max(1, round(self.command.sampler.bin_size * self.library.dt))
+    # ``sampler.bin_size`` is already in frames (e.g. 50 at 50 Hz); multiplying
+    # by the frame dt here would give 1 and write every frame into the bin.
+    bin_frames = max(1, int(self.command.sampler.bin_frames))
     clip_list: list[int] = []
     time_list: list[int] = []
     value_list: list[float] = []
@@ -351,7 +367,11 @@ class SuperMimicTrainer:
     term_losses = []
     self.world_model.train()
     for _ in range(cfg.wm_updates_per_iter):
-      env_ids, positions = self.buffer.sample_windows(cfg.wm_batch_size, k + 1)
+      env_ids, positions = self.buffer.sample_windows(
+        cfg.wm_batch_size, k + 1, generator=self._rng
+      )
+      if env_ids.numel() == 0:
+        continue
       states, actions, _ = self.buffer.gather_states(env_ids, positions, before=k)
       context = self.buffer.contexts[env_ids, positions]
       pred = states[:, 0]
@@ -361,21 +381,48 @@ class SuperMimicTrainer:
         loss = loss + self.world_model.state_loss(pred, states[:, j + 1])
       loss = loss / k
 
-      # Termination head: BCE against the simulator's hard termination labels
-      # (Eq. 1).  Sampled independently because the replay windows exclude
-      # episode ends, so they contain no positive labels.
-      sample = self.buffer.sample_random(cfg.wm_batch_size)
-      live = sample["live"]
-      if int(live.sum().item()) >= 2:
-        term_states = sample["state"][live]
-        term_goals = self._goal_for(
-          sample["clip_ids"][live], sample["time_steps"][live], term_states
-        )
-        term_loss = self.world_model.termination_loss(
-          term_states, term_goals, sample["terminated"][live]
-        )
-        loss = loss + cfg.wm_term_loss_weight * term_loss
-        term_losses.append(float(term_loss.item()))
+      # Termination head: BCE against the simulator's hard termination labels.
+      # ``d_hat(s)`` predicts "s is terminal" (Eq. 1).  Windows exclude episode
+      # ends, so positives come from the terminal-state ring buffer; negatives
+      # are ordinary (non-terminal) buffer states.  Positives are drawn at the
+      # natural rate so the head stays calibrated for the survival weights.
+      if self.buffer.terminal_count > 0:
+        sample = self.buffer.sample_random(cfg.wm_batch_size, generator=self._rng)
+        live = sample["live"]
+        n_live = int(live.sum().item())
+        if n_live >= 1:
+          total = max(1, int(self.buffer.count.sum().item()))
+          rate = self.buffer.terminal_count / total
+          n_pos = min(
+            self.buffer.terminal_count,
+            cfg.wm_batch_size,
+            max(1, int(round(cfg.wm_batch_size * rate))),
+          )
+          pos = self.buffer.sample_terminal(n_pos, generator=self._rng)
+          n_neg = min(n_live, cfg.wm_batch_size - n_pos)
+          neg_ids = live.nonzero(as_tuple=False).squeeze(-1)[:n_neg]
+          neg_states = sample["state"][neg_ids]
+          neg_goals = self._goal_for(
+            sample["clip_ids"][neg_ids], sample["time_steps"][neg_ids], neg_states
+          )
+          pos_goals = self._goal_for(
+            pos["clip_ids"], pos["time_steps"], pos["state"]
+          )
+          term_states = torch.cat([pos["state"], neg_states], dim=0)
+          term_goals = torch.cat([pos_goals, neg_goals], dim=0)
+          labels = torch.cat(
+            [
+              torch.ones(pos["state"].shape[0], device=self.device),
+              torch.zeros(neg_states.shape[0], device=self.device),
+            ]
+          )
+          term_loss = self.world_model.termination_loss(
+            term_states, term_goals, labels
+          )
+          # Eq. 1 sums the k state terms and one BCE; dividing both by k keeps
+          # the paper's 1/k relative weight for the termination term.
+          loss = loss + cfg.wm_term_loss_weight * term_loss / k
+          term_losses.append(float(term_loss.item()))
       self.wm_optimizer.zero_grad(set_to_none=True)
       if torch.isfinite(loss):
         loss.backward()
@@ -385,18 +432,23 @@ class SuperMimicTrainer:
         self.wm_optimizer.step()
       losses.append(float(loss.item()))
     with torch.no_grad():
-      env_ids, positions = self.buffer.sample_windows(cfg.wm_batch_size, k + 1)
-      states, actions, _ = self.buffer.gather_states(env_ids, positions, before=k)
-      context = self.buffer.contexts[env_ids, positions]
-      pred = states[:, 0]
-      errors = []
-      for j in range(k):
-        pred = self.world_model(pred, actions[:, j], context)
-        diff = self.world_model.state_norm.normalize(
-          pred
-        ) - self.world_model.state_norm.normalize(states[:, j + 1])
-        errors.append(diff.pow(2).mean())
-      window_error = float(torch.stack(errors).mean().sqrt().item())
+      env_ids, positions = self.buffer.sample_windows(
+        cfg.wm_batch_size, k + 1, generator=self._rng
+      )
+      if env_ids.numel() == 0:
+        window_error = 0.0
+      else:
+        states, actions, _ = self.buffer.gather_states(env_ids, positions, before=k)
+        context = self.buffer.contexts[env_ids, positions]
+        pred = states[:, 0]
+        errors = []
+        for j in range(k):
+          pred = self.world_model(pred, actions[:, j], context)
+          diff = self.world_model.state_norm.normalize(
+            pred
+          ) - self.world_model.state_norm.normalize(states[:, j + 1])
+          errors.append(diff.pow(2).mean())
+        window_error = float(torch.stack(errors).mean().sqrt().item())
     return {
       "world_model/loss": float(torch.tensor(losses).mean().item()),
       "world_model/window_error": window_error,
@@ -411,7 +463,7 @@ class SuperMimicTrainer:
       and self.world_model.state_norm.count.item() > 0
     ):
       return
-    sample = self.buffer.sample_random(self.cfg.norm_batch_size)
+    sample = self.buffer.sample_random(self.cfg.norm_batch_size, generator=self._rng)
     live = sample["live"]
     if int(live.sum().item()) < 64:
       return
@@ -423,12 +475,16 @@ class SuperMimicTrainer:
   def _update_critic_normalizer(self) -> None:
     """Fit the critic input normalizer on real transitions only.
 
-    Imagined states are deliberately excluded: fitting on the policy's own
-    rollouts would make the normalizer chase a moving, self-referential
-    distribution.  The statistics therefore track the replay buffer, which is
-    also where the critic's bootstrap values are evaluated.
+    The critic is trained and bootstrapped on *imagined* states, so this is a
+    deliberate stable reference rather than the exact input distribution:
+    fitting on the policy's own rollouts would make the normalizer chase a
+    moving, self-referential distribution.  Imagined inputs can drift a few
+    percent at the end of the horizon (measured ~5-7% in std); if that grows,
+    fit on the imagined batch or add an EMA update instead.
     """
-    sample = self.buffer.sample_random(self.cfg.critic_norm_batch_size)
+    sample = self.buffer.sample_random(
+      self.cfg.critic_norm_batch_size, generator=self._rng
+    )
     live = sample["live"]
     if int(live.sum().item()) < 64:
       return
@@ -459,7 +515,9 @@ class SuperMimicTrainer:
   ) -> torch.Tensor:
     n = self.history_len
     states, actions, dones = self.buffer.gather_states(env_ids, positions, before=n)
-    bias = self.buffer.contexts[env_ids, positions][:, 2 : 2 + self.spec.num_joints]
+    bias = context_encoder_bias(
+      self.buffer.contexts[env_ids, positions], self.spec.num_joints
+    )
     history = []
     for j in range(n):
       history.append(
@@ -520,13 +578,13 @@ class SuperMimicTrainer:
       times = time_steps
       with torch.enable_grad():
         for _t in range(cfg.horizon):
-          # Learned soft termination d_hat(s_t, g_t): differentiable, so the
-          # survival weight propagates gradient back into the policy.
-          term_prob = self.world_model.termination_prob(state, goal)
-          obs = self.proprio(
-            state, prev_action, context[:, 2 : 2 + self.spec.num_joints]
-          )
-          history = torch.cat([history[:, 1:], obs[:, None]], dim=1)
+          # ``history`` already ends at o_t (``_history_from_buffer`` builds it
+          # from s_{t-H+1}..s_t), so only later steps append the new frame.
+          if _t > 0:
+            obs = self.proprio(
+              state, prev_action, context_encoder_bias(context, self.spec.num_joints)
+            )
+            history = torch.cat([history[:, 1:], obs[:, None]], dim=1)
           action = self.actor_critic.act(history.reshape(history.shape[0], -1), goal)
           next_state = self.world_model(state, action, context)
           reference = _squeeze(self.library.gather(clip_ids, times, 1))
@@ -548,11 +606,13 @@ class SuperMimicTrainer:
             body_lin_vel,
             body_ang_vel,
           )
+          times = times + 1
+          goal = self._goal_for(clip_ids, times, next_state)
+          # Eq. 2/3 evaluate d_hat at s_{t+1} (the outcome of a_t), not at s_t.
+          term_prob = self.world_model.termination_prob(next_state, goal)
           chunk_rewards.append(reward)
           chunk_terms.append(term_prob)
           chunk_states.append(next_state)
-          times = times + 1
-          goal = self._goal_for(clip_ids, times, next_state)
           chunk_goals.append(goal)
           state = next_state
           prev_action = action
@@ -911,6 +971,9 @@ class SuperMimicTrainer:
         "env_steps": self.env_steps,
         "world_model": self.world_model.state_dict(),
         "actor_critic": self.actor_critic.state_dict(),
+        "wm_optimizer": self.wm_optimizer.state_dict(),
+        "actor_optimizer": self.actor_optimizer.state_dict(),
+        "critic_optimizer": self.critic_optimizer.state_dict(),
         "cfg": asdict(self.cfg),
       },
       path,
@@ -920,15 +983,29 @@ class SuperMimicTrainer:
 
   def load(self, path: str | Path) -> None:
     checkpoint = torch.load(path, map_location=self.device)
-    self.world_model.load_state_dict(checkpoint["world_model"], strict=False)
+    wm_missing, wm_unexpected = self.world_model.load_state_dict(
+      checkpoint["world_model"], strict=False
+    )
     missing, unexpected = self.actor_critic.load_state_dict(
       checkpoint["actor_critic"], strict=False
     )
+    if wm_missing or wm_unexpected:
+      print(
+        f"[WARN] world_model keys missing={len(wm_missing)} "
+        f"unexpected={len(wm_unexpected)}."
+      )
     if missing or unexpected:
       print(
         f"[WARN] Loaded checkpoint with missing={len(missing)} "
         f"unexpected={len(unexpected)} keys."
       )
+    for key, optimizer in (
+      ("wm_optimizer", self.wm_optimizer),
+      ("actor_optimizer", self.actor_optimizer),
+      ("critic_optimizer", self.critic_optimizer),
+    ):
+      if key in checkpoint:
+        optimizer.load_state_dict(checkpoint[key])
     self.iteration = int(checkpoint.get("iteration", 0))
     self.env_steps = int(checkpoint.get("env_steps", 0))
     print(f"[INFO] Loaded checkpoint {path} (iteration {self.iteration})")

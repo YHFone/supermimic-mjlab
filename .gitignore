@@ -40,3 +40,5 @@ motion_data/
 .vscode/
 .idea/
 .DS_Store
+export/
+scratch

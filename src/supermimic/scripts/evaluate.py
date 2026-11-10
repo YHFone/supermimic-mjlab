@@ -10,7 +10,11 @@ import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs.mdp.dr import geom_friction
+from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from supermimic.algo.config import SuperMimicCfg
+from supermimic.algo.state import context_encoder_bias
 from supermimic.algo.trainer import SuperMimicTrainer
 from supermimic.config.g1.env_cfgs import (
   unitree_g1_supermimic_env_cfg,
@@ -42,14 +46,30 @@ def main() -> None:
   cfg = SuperMimicCfg(**checkpoint["cfg"])
   cfg.device = args.device
   files = find_motion_files(args.motion_dir, args.motion_files)
+  num_clips = len(files)
+  num_envs = max(1, min(args.num_envs, num_clips))
   torch.manual_seed(args.seed)
-  env_cfg = unitree_g1_supermimic_env_cfg(files, num_envs=args.num_envs, play=True)
+  env_cfg = unitree_g1_supermimic_env_cfg(files, num_envs=num_envs, play=True)
   env_cfg.seed = args.seed
-  env_cfg.events = {}
+  # Paper F.1: no domain randomization, foot friction 1.0, clean observations.
+  env_cfg.events = {
+    "eval_friction": EventTermCfg(
+      mode="reset",
+      func=geom_friction,
+      params={
+        "asset_cfg": SceneEntityCfg(
+          "robot", geom_names=r"^(left|right)_foot[1-7]_collision$"
+        ),
+        "operation": "abs",
+        "ranges": (1.0, 1.0),
+        "shared_random": True,
+      },
+    )
+  }
   env_cfg.episode_length_s = 60.0
   command_cfg = env_cfg.commands["motion"]
   assert isinstance(command_cfg, MotionLibraryCommandCfg)
-  command_cfg.sampling_mode = "start"
+  command_cfg.sampling_mode = "cycle"
   command_cfg.pose_range = {}
   command_cfg.velocity_range = {}
   command_cfg.joint_position_range = (0.0, 0.0)
@@ -73,14 +93,19 @@ def main() -> None:
   completed_error_rot: list[float] = []
   ep_error_pos = torch.zeros(n, device=trainer.device)
   ep_error_rot = torch.zeros(n, device=trainer.device)
-  env_episodes = torch.zeros(n, dtype=torch.long, device=trainer.device)
-  target_per_env = args.episodes_per_env
+  # One deterministic pass over the library: cycle mode assigns clips in
+  # order, and only the first completed rollout of each clip is recorded.
+  seen_clips: set[int] = set()
+  print(
+    f"[INFO] {num_clips} clips, {n} envs; stopping after one rollout per clip.",
+    flush=True,
+  )
   frames = []
 
   for _ in range(args.max_steps):
     state = trainer.extractor.state()
     context = trainer.extractor.context()
-    bias = context[:, 2 : 2 + trainer.spec.num_joints]
+    bias = context_encoder_bias(context, trainer.spec.num_joints)
     obs = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
     trainer.history = torch.cat([trainer.history[:, 1:], obs[:, None]], dim=1)
     goal = command.goal()
@@ -109,22 +134,23 @@ def main() -> None:
     if bool(done.any()):
       done_ids = done.nonzero(as_tuple=False).squeeze(-1)
       for env_id in done_ids.cpu().tolist():
-        if int(env_episodes[env_id].item()) >= target_per_env:
+        clip_id = int(command.clip_ids[env_id].item())
+        if clip_id in seen_clips:
           continue
+        seen_clips.add(clip_id)
         completed_returns.append(float(ep_return[env_id].item()))
         completed_steps.append(int(ep_steps[env_id].item()))
         completed_failed.append(bool(ep_failed[env_id].item()))
         steps = max(1, int(ep_steps[env_id].item()))
         completed_error_pos.append(float(ep_error_pos[env_id].item()) / steps)
         completed_error_rot.append(float(ep_error_rot[env_id].item()) / steps)
-        env_episodes[env_id] += 1
       env.reset(env_ids=done_ids)
       new_state = trainer.extractor.state()[done_ids]
       new_context = trainer.extractor.context()[done_ids]
       new_obs = trainer.proprio(
         new_state,
         torch.zeros_like(trainer.last_action[done_ids]),
-        new_context[:, 2 : 2 + trainer.spec.num_joints],
+        context_encoder_bias(new_context, trainer.spec.num_joints),
         add_noise=False,
       )
       trainer.history[done_ids] = new_obs[:, None, :].expand(
@@ -136,7 +162,7 @@ def main() -> None:
       ep_failed[done_ids] = False
       ep_error_pos[done_ids] = 0.0
       ep_error_rot[done_ids] = 0.0
-      if bool((env_episodes >= target_per_env).all()):
+      if len(seen_clips) >= num_clips:
         break
 
   summaries = summarize(

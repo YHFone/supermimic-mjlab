@@ -33,7 +33,7 @@ class MotionLibraryCommandCfg(CommandTermCfg):
   body_names: tuple[str, ...] = ()
   anchor_body_name: str = ""
   goal_frames: int = 10
-  sampling_mode: Literal["start", "uniform", "return"] = "return"
+  sampling_mode: Literal["start", "uniform", "return", "cycle"] = "return"
   pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
   velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
   joint_position_range: tuple[float, float] = (0.0, 0.0)
@@ -74,6 +74,12 @@ class MotionLibraryCommand(CommandTerm):
         max_frames=cfg.max_frames,
       )
     )
+    if abs(self.library.dt - env.step_dt) > 1e-6:
+      raise ValueError(
+        f"MotionLibrary dt={self.library.dt:.5f}s != env.step_dt={env.step_dt:.5f}s; "
+        "one reference frame is advanced per control step, so resample the motions "
+        "to the control frequency (or change the decimation)."
+      )
     self.default_joint_pos = self.robot.data.default_joint_pos[0].clone()
     self.soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits
     self.goal_features = GoalFeatures(
@@ -85,6 +91,7 @@ class MotionLibraryCommand(CommandTerm):
 
     self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+    self._cycle_cursor = 0
     self.sampler = ReturnBasedSampler(
       self.library.clip_lengths_t,
       self.library.dt,
@@ -288,6 +295,13 @@ class MotionLibraryCommand(CommandTerm):
       clip_ids = torch.randint(0, self.library.num_clips, (n,), device=self.device)
       lengths = self.library.clip_lengths_t[clip_ids]
       times = (torch.rand(n, device=self.device) * lengths.float()).long()
+    elif self.cfg.sampling_mode == "cycle":
+      # Deterministic sweep: every motion is visited once per library pass,
+      # which is what the paper's evaluation protocol requires.
+      start = self._cycle_cursor
+      clip_ids = (torch.arange(n, device=self.device) + start) % self.library.num_clips
+      self._cycle_cursor = int((start + n) % self.library.num_clips)
+      times = torch.zeros(n, dtype=torch.long, device=self.device)
     else:
       clip_ids, times = self.sampler.sample(n)
 

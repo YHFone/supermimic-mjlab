@@ -182,6 +182,15 @@ class StateExtractor:
     return torch.cat([friction[:, None], self.encoder_bias(), com_offset], dim=-1)
 
 
+def context_encoder_bias(context: torch.Tensor, num_joints: int) -> torch.Tensor:
+  """Encoder calibration offsets inside the world-model context.
+
+  ``StateExtractor.context`` returns ``[friction, bias(J), com_offset(3)]``;
+  the bias therefore starts at index 1, not 2.
+  """
+  return context[..., 1 : 1 + num_joints]
+
+
 def _short_name(name: str) -> str:
   return name.rsplit("/", 1)[-1]
 

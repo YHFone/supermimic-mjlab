@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from mjlab.envs import ManagerBasedRlEnv
 from supermimic.algo.config import SuperMimicCfg
+from supermimic.algo.state import context_encoder_bias
 from supermimic.algo.trainer import SuperMimicTrainer
 from supermimic.config.g1.env_cfgs import (
   unitree_g1_supermimic_env_cfg,
@@ -114,7 +115,7 @@ class SuperMimicPolicy:
     env = trainer.env
     state = trainer.extractor.state()
     context = trainer.extractor.context()
-    bias = context[:, 2 : 2 + trainer.spec.num_joints]
+    bias = context_encoder_bias(context, trainer.spec.num_joints)
     obs_t = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
     if self._first:
       reset = torch.ones(self.n, dtype=torch.bool, device=trainer.device)
@@ -206,7 +207,7 @@ def _run_video(args: PlayArgs, files) -> None:
   env.sim.forward()
   state = trainer.extractor.state()
   context = trainer.extractor.context()
-  bias = context[:, 2 : 2 + trainer.spec.num_joints]
+  bias = context_encoder_bias(context, trainer.spec.num_joints)
   obs = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
   trainer.history[:] = obs[:, None, :].expand_as(trainer.history)
   trainer.last_action.zero_()
@@ -240,7 +241,7 @@ def _run_video(args: PlayArgs, files) -> None:
       next_obs = trainer.proprio(
         next_state,
         trainer.last_action,
-        trainer.extractor.context()[:, 2 : 2 + trainer.spec.num_joints],
+        context_encoder_bias(trainer.extractor.context(), trainer.spec.num_joints),
         add_noise=False,
       )
       trainer.history = torch.cat([trainer.history[:, 1:], next_obs[:, None]], dim=1)
