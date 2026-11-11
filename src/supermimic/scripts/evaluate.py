@@ -65,7 +65,7 @@ def main() -> None:
       },
     )
   }
-  env_cfg.episode_length_s = 60.0
+  env_cfg.episode_length_s = 1e9
   command_cfg = env_cfg.commands["motion"]
   assert isinstance(command_cfg, MotionLibraryCommandCfg)
   command_cfg.sampling_mode = "cycle"

@@ -66,7 +66,9 @@ def unitree_g1_supermimic_env_cfg(
       elevation=-5.0,
       azimuth=120.0,
     ),
-    episode_length_s=10.0,
+    # Official: no wall-clock episode limit; an episode ends when the clip
+    # ends (``motion_end``) or the agent fails.
+    episode_length_s=1e9,
     auto_reset=False,
   )
 

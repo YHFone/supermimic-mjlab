@@ -216,7 +216,6 @@ class SuperMimicTrainer:
       env.num_envs, self.spec.action_dim, device=self.device
     )
 
-    max_episode_steps = int(math.ceil(env.max_episode_length_s / env.step_dt)) + 2
     self.episode_len = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
     self.episode_return = torch.zeros(env.num_envs, device=self.device)
     self.episode_length = torch.zeros(
