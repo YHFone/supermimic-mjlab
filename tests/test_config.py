@@ -11,6 +11,9 @@ def test_g1_rl_cfg_matches_official_defaults():
   assert isinstance(cfg, SuperMimicCfg)
   assert cfg.actor_obs_mode == "rep_state"
   assert cfg.obs_history == 1
+  assert cfg.wm_loss_mode == "bryson"
+  assert cfg.use_muon_actor is True
+  assert cfg.norm_interval == 1
   assert cfg.goal_frames == 10 and cfg.goal_stride == 5
   assert cfg.termination_softness == 0.05
   assert cfg.horizon == 32

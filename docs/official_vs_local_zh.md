@@ -19,10 +19,10 @@
 | ξ | `[friction, com(3), bias(29)]`，按 DR 范围归一化 | 同 | ✅ |
 | 奖励 | 8 项，FK 重构后打分，`dt` 缩放 | 同 | ✅ |
 | 终止 | 解析软阈值（零参数） | 同 | ✅ |
-| 默认 actor 观测 | `rep_state`（68，1 帧，无噪声） | `proprio`（93，10 帧，带噪）← 本地默认不同 | ❌ |
-| 默认 WM 损失 | Bryson `(0.01, 0.02, 0.1, 3.14)` | `paper` 等权 | ❌ |
-| 默认 actor 优化器 | Muon + Adam | Adam（`use_muon_actor` 可开） | ❌ |
-| 归一化器更新 | **每个收集步** | 每 10 迭代、随机 65536 样本 | ❌ |
+| 默认 actor 观测 | `rep_state`（68，1 帧，无噪声） | 同（`proprio` 保留为选项，部署用） | ✅ |
+| 默认 WM 损失 | Bryson `(0.01, 0.02, 0.1, 3.14)` | 同（`paper` 保留为选项） | ✅ |
+| 默认 actor 优化器 | Muon + Adam | 同 | ✅ |
+| 归一化器更新 | **每个收集步** | 同（`norm_interval=1`） | ✅ |
 | 缺失分支 | — | velocity 槽位、MaxCoord、PPO 基线、W&B、CUDA graph | ❌ |
 
 **最重要的一条更正**：上一轮我说"官方默认是 PPO"是**错的**。官方的 `ActorCriticPolicyLearner` 仍然是用解析梯度穿过世界模型（`policy_learner.py:95-127` 的 `_train_batch` 与 BPTT 共用），它只是比纯 BPTT 多了 critic 自举和 GAE 拟合。
@@ -163,12 +163,12 @@
 | 动作变换 | `a·scale+offset` | 同（与官方 checkpoint 逐元素相同） | ✅ |
 | 奖励 | 8 项 + re-anchor + dt | 同 | ✅ |
 | 终止 | `σ((max(|Δz|/0.25,|Δg_z|/0.8)−1)/0.05)` | 同 | ✅ |
-| WM 损失 | Bryson `1/nominal²`，评 7 步 | 可选 `bryson` / `paper` | ⚠️ 默认不同 |
+| WM 损失 | Bryson `1/nominal²`，评 7 步 | 同（`paper` 可选） | ✅ |
 | 归一化器 | eps=1e-2 加在 std 外，eval no-op | 同 | ✅ |
 | critic | 无归一化，clamp 10 | 同 | ✅ |
-| 优化器 | Muon(WM+actor)+Adam | Muon(WM)+Adam(actor) | ⚠️ 默认不同 |
-| 归一化更新 | 每收集步 | 每 10 迭代 | ⚠️ |
-| actor 输入 | 708（rep 68 + goal 640） | 1570（proprio 930 + 640） | ❌ 默认不同 |
+| 优化器 | Muon(WM+actor)+Adam | 同 | ✅ |
+| 归一化更新 | 每收集步 | 同 | ✅ |
+| actor 输入 | 708（rep 68 + goal 640） | 同（默认 rep_state） | ✅ |
 | 多任务槽 | motion + velocity | 仅 motion | ❌ |
 | MaxCoord | 有 | 无 | ❌ |
 
@@ -180,11 +180,14 @@
 奖励 8 项、解析终止、critic 结构（无归一化 + clamp）、GAE 形式、Muon 分配规则、
 RSI 三成分、buffer 不跨 episode、ONNX 只允许 proprio。
 
-**语义不同（本地改动，需明确取舍）**：
-1. `actor_obs_mode` 默认 `proprio`/10 帧（官方 `rep_state`/1 帧）；
-2. `wm_loss_mode` 默认 `paper`（官方 `bryson`）；
-3. `use_muon_actor` 默认关（官方开）；
-4. 归一化器每 10 迭代更新（官方每步）。
+**已改为官方默认（2026-11-11）**：
+1. `actor_obs_mode="rep_state"`、`obs_history=1`；
+2. `wm_loss_mode="bryson"`；
+3. `use_muon_actor=True`；
+4. `norm_interval=1`（世界模型归一化器每个收集步更新）。
+
+以上四项均保留旧行为为显式选项（`proprio` + `obs_history=10`、`wm_loss_mode="paper"`、
+`use_muon_actor=False`、`norm_interval>1`），便于 A/B。
 
 **官方有、本地无**：velocity 任务槽与 latent BC、MaxCoord 表示、PPO 基线 runner、
 W&B、CUDA graph 捕获、ONNX 的 15000 帧上限。
@@ -245,8 +248,8 @@ W&B、CUDA graph 捕获、ONNX 的 15000 帧上限。
 
 ## 5. 建议
 
-1. **默认值回到官方口径**（rep_state/1、bryson、Muon actor、每步更新归一化），
-   把 `proprio/10`、`paper` 保留为显式选项——这样"对齐官方"与"调优"不再混在一起。
+1. ~~默认值回到官方口径~~ **已完成**：`rep_state/1`、`bryson`、`Muon actor`、`norm_interval=1`；
+   `proprio/10`、`paper` 保留为显式选项。
 2. **learner 默认改为 `bptt`**（γ=1、无 critic），至少在早期 2k–5k 迭代；AC 只在
    `H` 需要超过 32、或策略已经稳定后启用。上面 4.3 的数据支持这个顺序（先 BPTT 再开 critic，
    或者把 critic 的启动延后，类似 warmup）。

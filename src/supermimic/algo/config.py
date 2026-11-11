@@ -42,18 +42,17 @@ class SuperMimicCfg:
   sensor_noise_projected_gravity: float = 0.05
 
   # Actor observation.
-  actor_obs_mode: Literal["rep_state", "proprio"] = "proprio"
-  """Actor observation.
+  actor_obs_mode: Literal["rep_state", "proprio"] = "rep_state"
+  """Actor observation (official default ``rep_state``).
 
-  ``proprio`` (default here): the 93-dim deployable sensor observation with
-  uniform noise (paper Table A.1).  Only ``proprio`` can be exported.
+  ``rep_state``: 68-dim GenCoord state, single frame, no sensor noise — what
+  the official runner feeds the actor by default.
 
-  ``rep_state``: the official default, 68-dim GenCoord state with no noise and
-  no history.  Kept for reproducing the official configuration exactly.
+  ``proprio``: 93-dim deployable sensor observation with uniform noise (paper
+  Table A.1).  Required for ONNX export and for the real robot.
   """
-  obs_history: int = 10
-  """Actor history frames. 10 with ``proprio`` (paper Table A.1); 1 for
-  ``rep_state`` (official)."""
+  obs_history: int = 1
+  """Actor history frames (official 1).  ``>1`` requires ``proprio``."""
 
   # Goal.
   goal_frames: int = 10
@@ -72,14 +71,14 @@ class SuperMimicCfg:
   wm_hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   wm_lr: float = 2.0e-4
   wm_grad_clip: float = 1.0
-  wm_loss_mode: str = "paper"
-  """``paper``: equal weight per state channel in normalized space (Eq. 1).
+  wm_loss_mode: str = "bryson"
+  """World-model loss weighting (official default ``bryson``).
 
-  ``bryson``: official weighting ``1/nominal^2`` per channel group, which puts
-  ~95% of the loss on the root pose.  That is fine for the official default
-  actor-critic learner, but under BPTT it starves the joint/velocity channels
-  that the tracking reward depends on (measured: the policy plateaus while the
-  official-weighted model still fits the root pose).
+  ``bryson``: ``1/nominal^2`` per channel group (official), which puts ~95 % of
+  the loss on the root pose.
+
+  ``paper``: equal weight per state channel in normalized space (Eq. 1).  Kept
+  as an option: under BPTT it fits the joint/velocity channels much better.
   """
   wm_nominal_error_root_pos: float = 0.01
   wm_nominal_error_root_ori: float = 0.02
@@ -119,16 +118,17 @@ class SuperMimicCfg:
   grad_clip_elementwise: float = 0.1
   use_muon: bool = True
   """Muon on the world-model hidden ``Linear`` weights."""
-  use_muon_actor: bool = False
-  """Muon on the actor/critic hidden ``Linear`` weights.
-
-  Official uses Muon everywhere, but with analytic BPTT gradients the actor
-  step direction is much more sensitive to the optimizer's implicit scaling;
-  Adam was stable in the pre-alignment implementation.
-  """
+  use_muon_actor: bool = True
+  """Muon on the actor/critic hidden ``Linear`` weights (official default)."""
 
   # Normalizer updates.
-  norm_interval: int = 10
+  norm_interval: int = 1
+  """World-model normalizer update period, in iterations.
+
+  ``1`` (official): update from every collected step's batch.  ``>1`` falls
+  back to the cheaper path — every ``norm_interval`` iterations from a random
+  ``norm_batch_size`` buffer sample.
+  """
   norm_batch_size: int = 65_536
 
   # Schedule.

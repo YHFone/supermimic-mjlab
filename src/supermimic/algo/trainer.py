@@ -349,6 +349,12 @@ class SuperMimicTrainer:
         action.shape, generator=self._rng, device=self.device, dtype=action.dtype
       )
       noisy_action = action + noise * self.cfg.action_noise
+      if self.cfg.norm_interval <= 1:
+        # Official: the world-model normalizers see every collected step (the
+        # noised action that was actually executed).
+        self.world_model.update_normalizers(
+          self.representation.represent(state), noisy_action
+        )
       clip_ids = self.command.clip_ids.clone()
       time_steps = self.command.time_steps.clone()
       pre_frames = self.command.global_frame_index(clip_ids, time_steps)
@@ -496,6 +502,9 @@ class SuperMimicTrainer:
     }
 
   def _update_normalizers(self) -> None:
+    if self.cfg.norm_interval <= 1:
+      # Already updated from every collected batch inside ``_collect``.
+      return
     if (
       self.iteration % self.cfg.norm_interval != 0
       and self.world_model.rep_norm.count.item() > 0
