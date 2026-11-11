@@ -782,6 +782,12 @@ class SuperMimicTrainer:
       / max(1, cfg.wm_window)
       * cfg.replay_ratio
     )
+    # Metrics accumulate between logs (official keeps one loss_dict per log
+    # window); only the current iteration is not representative when a round
+    # fires on 40 % of the steps.
+    window_metrics: dict[str, float] = {}
+    window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
+    window_rounds = 0.0
     while self.iteration < cfg.num_iterations:
       iteration_start = time.time()
       logs: dict[str, float] = {}
@@ -804,10 +810,21 @@ class SuperMimicTrainer:
       self._set_lr(self.iteration)
       self.iteration += 1
 
+      for key, value in logs.items():
+        if key in window_time:
+          window_time[key] += value
+        else:
+          window_metrics[key] = value
+      window_rounds += train_rounds
+
       if cfg.log_interval > 0 and (
         self.iteration % cfg.log_interval == 0 or self.iteration == cfg.num_iterations
       ):
-        self._log_iteration(logs, time.time() - iteration_start)
+        merged = {**window_metrics, **window_time, "train/rounds": window_rounds}
+        self._log_iteration(merged, time.time() - iteration_start)
+        window_metrics.clear()
+        window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
+        window_rounds = 0.0
       if cfg.save_interval > 0 and self.iteration % cfg.save_interval == 0:
         self.save()
 
@@ -894,6 +911,7 @@ class SuperMimicTrainer:
       line("Mean reward per step", f"{mean_step_reward:.4f}"),
       line("Mean action std", f"{mean_action_std:.4f}"),
       line("Success rate", success_rate),
+      line("Training rounds", f"{int(g('train/rounds'))}"),
       line("Done rate", f"{g('collect/done_rate'):.4f}"),
       line("Bad gradients", f"{int(g('policy/bad_grads'))}"),
       line("Learning rate", f"{self.actor_optimizers[0].param_groups[0]['lr']:.2e}"),
