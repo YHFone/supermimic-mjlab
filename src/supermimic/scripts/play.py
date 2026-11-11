@@ -238,11 +238,11 @@ def _run_video(args: PlayArgs, files) -> None:
         {k: v[:, 0] for k, v in reference.items()},
       )
       trainer.last_action = action
-      next_obs = trainer.proprio(
+      next_obs = trainer.actor_obs(
         next_state,
         trainer.last_action,
-        context_encoder_bias(trainer.extractor.context(), trainer.spec.num_joints),
-        add_noise=False,
+        trainer.extractor.context(),
+        noisy=False,
       )
       trainer.history = trainer.push_history(trainer.history, next_obs)
       policy_frame = env.render()

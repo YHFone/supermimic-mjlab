@@ -42,14 +42,18 @@ class SuperMimicCfg:
   sensor_noise_projected_gravity: float = 0.05
 
   # Actor observation.
-  actor_obs_mode: Literal["rep_state", "proprio"] = "rep_state"
-  """``rep_state`` (official default): the 68-dim GenCoord state, noiseless.
+  actor_obs_mode: Literal["rep_state", "proprio"] = "proprio"
+  """Actor observation.
 
-  ``proprio``: the 93-dim deployable sensor observation with uniform noise
-  (paper Table A.1).  Only ``proprio`` can be exported for the real robot.
+  ``proprio`` (default here): the 93-dim deployable sensor observation with
+  uniform noise (paper Table A.1).  Only ``proprio`` can be exported.
+
+  ``rep_state``: the official default, 68-dim GenCoord state with no noise and
+  no history.  Kept for reproducing the official configuration exactly.
   """
-  obs_history: int = 1
-  """Actor history frames; official default 1.  ``>1`` requires ``proprio``."""
+  obs_history: int = 10
+  """Actor history frames. 10 with ``proprio`` (paper Table A.1); 1 for
+  ``rep_state`` (official)."""
 
   # Goal.
   goal_frames: int = 10
@@ -68,6 +72,15 @@ class SuperMimicCfg:
   wm_hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   wm_lr: float = 2.0e-4
   wm_grad_clip: float = 1.0
+  wm_loss_mode: str = "paper"
+  """``paper``: equal weight per state channel in normalized space (Eq. 1).
+
+  ``bryson``: official weighting ``1/nominal^2`` per channel group, which puts
+  ~95% of the loss on the root pose.  That is fine for the official default
+  actor-critic learner, but under BPTT it starves the joint/velocity channels
+  that the tracking reward depends on (measured: the policy plateaus while the
+  official-weighted model still fits the root pose).
+  """
   wm_nominal_error_root_pos: float = 0.01
   wm_nominal_error_root_ori: float = 0.02
   wm_nominal_error_joint_pos: float = 0.1
@@ -91,7 +104,14 @@ class SuperMimicCfg:
   grad_clip: float = 1.0
   grad_clip_elementwise: float = 0.1
   use_muon: bool = True
-  """Muon on the hidden ``Linear`` weights of every ``nn.Sequential``."""
+  """Muon on the world-model hidden ``Linear`` weights."""
+  use_muon_actor: bool = False
+  """Muon on the actor/critic hidden ``Linear`` weights.
+
+  Official uses Muon everywhere, but with analytic BPTT gradients the actor
+  step direction is much more sensitive to the optimizer's implicit scaling;
+  Adam was stable in the pre-alignment implementation.
+  """
 
   # Normalizer updates.
   norm_interval: int = 10

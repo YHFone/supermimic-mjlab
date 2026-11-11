@@ -209,7 +209,7 @@ def build_goal(
   if yaw_offset is not None:
     ref_quat = quat_mul(np.asarray(yaw_offset, dtype=np.float64), ref_quat)
   rel_quat = quat_mul(quat_inv(np.asarray(root_quat, dtype=np.float64)), ref_quat)
-  ori = quat_to_matrix(rel_quat)[:, :, :2].reshape(len(window), 6)
+  ori = quat_to_matrix(rel_quat)[:, :2, :].reshape(len(window), 6)
   content = np.concatenate(
     [motion.joint_pos[window], motion.joint_vel[window]], axis=1
   )

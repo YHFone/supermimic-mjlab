@@ -168,27 +168,42 @@ class SimContext(nn.Module):
     cls, env: ManagerBasedRlEnv, *, torso_body_name: str = "torso_link"
   ) -> "SimContext":
     events = env.cfg.events
-    for name in ("foot_friction", "base_com", "encoder_bias"):
-      if name not in events:
-        raise RuntimeError(
-          f"SimContext requires the '{name}' randomization event; enable it in "
-          "the env config so the world model can condition on it."
-        )
+    # Evaluation and play configs drop the domain-randomization events.  The
+    # context must still be normalized with the *training* ranges, otherwise the
+    # world model sees a differently scaled xi than it was trained on.  Fall back
+    # to the official defaults instead of failing.
+    missing = [n for n in ("foot_friction", "base_com", "encoder_bias") if n not in events]
+    if missing:
+      print(
+        f"[WARN] SimContext: missing DR events {missing}; using the training "
+        "ranges and reading the (constant) model values.",
+        flush=True,
+      )
     model = env.sim.mj_model
     robot = env.scene["robot"]
     torso_id = _model_name_id(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_name)
 
-    friction_ranges = events["foot_friction"].params["ranges"]
-    if isinstance(friction_ranges, dict):
-      friction_range = tuple(friction_ranges[0])
+    if "foot_friction" in events:
+      friction_ranges = events["foot_friction"].params["ranges"]
+      if isinstance(friction_ranges, dict):
+        friction_range = tuple(friction_ranges[0])
+      else:
+        friction_range = tuple(friction_ranges)
+      pattern = events["foot_friction"].params["asset_cfg"].geom_names
     else:
-      friction_range = tuple(friction_ranges)
+      friction_range = (0.3, 1.2)
+      pattern = r"^(left|right)_foot[1-7]_collision$"
 
-    com_params = events["base_com"].params
-    com_ranges = {i: tuple(com_params["ranges"][i]) for i in range(3)}
-    bias_range = tuple(events["encoder_bias"].params["bias_range"])
-
-    pattern = events["foot_friction"].params["asset_cfg"].geom_names
+    if "base_com" in events:
+      com_params = events["base_com"].params
+      com_ranges = {i: tuple(com_params["ranges"][i]) for i in range(3)}
+    else:
+      com_ranges = {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}
+    bias_range = (
+      tuple(events["encoder_bias"].params["bias_range"])
+      if "encoder_bias" in events
+      else (-0.01, 0.01)
+    )
     regex = re.compile(pattern) if isinstance(pattern, str) else None
     foot_geom = None
     for i in range(model.ngeom):

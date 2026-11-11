@@ -129,7 +129,7 @@ def test_world_model_shapes_and_bryson_loss():
   rep = _rep()
   wm = WorldModel(
     rep,
-    WorldModelCfg(context_dim=33, hidden_dims=(16,)),
+    WorldModelCfg(context_dim=33, hidden_dims=(16,), loss_mode="bryson"),
     action_scale=torch.ones(J),
     action_offset=torch.zeros(J),
   )

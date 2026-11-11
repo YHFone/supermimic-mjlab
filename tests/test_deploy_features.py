@@ -45,6 +45,6 @@ def test_goal_is_block_major_640():
   # columns repeated for every frame.
   ori = goal[580:].reshape(10, 6)
   for frame in ori:
-    # Both training and deployment take the first two ROWS of R, i.e.
-    # [R00, R01, R10, R11, R20, R21] = [1, 0, 0, 1, 0, 0] for identity.
-    assert np.allclose(frame, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], atol=1e-6)
+    # Training flattens ``matrix_from_quat(...)[..., :2]``: the first two ROWS
+    # of R, i.e. [R00, R01, R02, R10, R11, R12] = [1, 0, 0, 0, 1, 0] for I.
+    assert np.allclose(frame, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], atol=1e-6)

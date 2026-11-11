@@ -179,10 +179,13 @@ class SuperMimicTrainer:
       device=self.device,
     )
 
-    action_cfg = env.cfg.actions["joint_pos"]
-    action_scale = torch.as_tensor(
-      action_cfg.scale, dtype=torch.float32, device=self.device
-    ).flatten()
+    # ``cfg.scale`` may be a float or a ``{joint_name: value}`` dict; the action
+    # term resolves it into a ``(num_envs, action_dim)`` tensor in action order.
+    raw_scale = env.action_manager.get_term("joint_pos").scale
+    action_scale = torch.as_tensor(raw_scale, dtype=torch.float32, device=self.device)
+    if action_scale.dim() == 2:
+      action_scale = action_scale[0]
+    action_scale = action_scale.flatten()
     if action_scale.numel() == 1:
       action_scale = action_scale.expand(self.spec.num_joints)
     if action_scale.numel() != self.spec.num_joints:
@@ -194,6 +197,7 @@ class SuperMimicTrainer:
       self.representation,
       WorldModelCfg(
         context_dim=self.spec.context_dim,
+        loss_mode=cfg.wm_loss_mode,
         hidden_dims=cfg.wm_hidden_dims,
         nominal_error_root_pos=cfg.wm_nominal_error_root_pos,
         nominal_error_root_ori=cfg.wm_nominal_error_root_ori,
@@ -231,7 +235,7 @@ class SuperMimicTrainer:
       [self.actor_critic.encoder, self.actor_critic.decoder],
       cfg.actor_lr,
       betas=(0.9, 0.95),
-      use_muon=cfg.use_muon,
+      use_muon=cfg.use_muon and cfg.use_muon_actor,
     )
     self.critic_optimizers = build_optimizers(
       [self.actor_critic.critic], cfg.critic_lr, use_muon=cfg.use_muon
@@ -463,22 +467,30 @@ class SuperMimicTrainer:
         auxs = self.representation.extract_aux_state(states)
         pred_aux, pred_rep = auxs[:, 0], reps[:, 0]
         errors = []
+        group_errors: dict[str, list[torch.Tensor]] = {}
         for j in range(scored):
           pred_aux, pred_rep = self.world_model(
             pred_aux, pred_rep, actions[:, j], context
           )
           pred_blocks = self.representation.loss_blocks(pred_rep, pred_aux)
           gt_blocks = self.representation.loss_blocks(reps[:, j + 1], auxs[:, j + 1])
-          errors.append(
-            sum(((pred_blocks[k_] - gt_blocks[k_]) ** 2).mean() for k_ in pred_blocks)
-            / len(pred_blocks)
-          )
+          mse = {}
+          for k_ in pred_blocks:
+            value = ((pred_blocks[k_] - gt_blocks[k_]) ** 2).mean(dim=0).mean()
+            mse[k_] = value
+            group_errors.setdefault(k_, []).append(value)
+          errors.append(sum(mse.values()) / len(mse))
         window_error = float(torch.stack(errors).mean().sqrt().item())
+        group_rmse = {
+          f"world_model/rmse_{k_}": float(torch.stack(v).mean().sqrt().item())
+          for k_, v in group_errors.items()
+        }
     return {
       "world_model/loss": float(torch.tensor(losses).mean().item())
       if losses
       else 0.0,
       "world_model/window_error": window_error,
+      **(group_rmse if env_ids.numel() > 0 else {}),
     }
 
   def _update_normalizers(self) -> None:

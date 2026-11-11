@@ -44,6 +44,7 @@ def _mlp(
 @dataclass
 class WorldModelCfg:
   context_dim: int = 33
+  loss_mode: str = "paper"
   hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   activation: str = "gelu"
   # Bryson "nominal error" per channel group; the loss weights are 1/nominal².
@@ -79,6 +80,7 @@ class WorldModel(nn.Module):
       representation.prediction_dim,
       cfg.activation,
     )
+    self.loss_mode = cfg.loss_mode
     self.loss_nominal = {
       "root_pos": cfg.nominal_error_root_pos,
       "root_ori": cfg.nominal_error_root_ori,
@@ -131,8 +133,11 @@ class WorldModel(nn.Module):
       target = gt_blocks[name]
       mse = ((pred - target) ** 2).mean()
       n = pred.shape[-1]
-      weight = 1.0 / self.loss_nominal[name] ** 2
-      total = total + weight * n * mse
+      if self.loss_mode == "bryson":
+        weight = 1.0 / self.loss_nominal[name] ** 2
+        total = total + weight * n * mse
+      else:
+        total = total + n * mse
       width = width + n
     return total / width
 

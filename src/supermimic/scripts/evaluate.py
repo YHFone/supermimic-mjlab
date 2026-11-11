@@ -147,11 +147,11 @@ def main() -> None:
       env.reset(env_ids=done_ids)
       new_state = trainer.extractor.state()[done_ids]
       new_context = trainer.extractor.context()[done_ids]
-      new_obs = trainer.proprio(
+      new_obs = trainer.actor_obs(
         new_state,
         torch.zeros_like(trainer.last_action[done_ids]),
-        context_encoder_bias(new_context, trainer.spec.num_joints),
-        add_noise=False,
+        new_context,
+        noisy=False,
       )
       trainer.history[done_ids] = new_obs[:, None, :].expand(
         -1, trainer.history_len, -1
