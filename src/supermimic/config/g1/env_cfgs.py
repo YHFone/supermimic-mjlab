@@ -66,8 +66,8 @@ def unitree_g1_supermimic_env_cfg(
       elevation=-5.0,
       azimuth=120.0,
     ),
-    # Official training value (mjlab_research tracking_env_cfg.py:316).  Play
-    # mode overrides it to 1e9 so playback runs to the end of each clip.
+    # Official values (mjlab_research tracking_env_cfg.py:316 and the play
+    # override at .../g1/env_cfgs.py:89).
     episode_length_s=1e9 if play else 10.0,
     auto_reset=False,
   )
@@ -137,7 +137,7 @@ def unitree_g1_supermimic_env_cfg(
 
   cfg.events = {
     "base_com": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=body_com_offset,
       params={
         "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
@@ -150,7 +150,7 @@ def unitree_g1_supermimic_env_cfg(
       },
     ),
     "encoder_bias": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=encoder_bias,
       params={
         "asset_cfg": SceneEntityCfg("robot"),
@@ -158,7 +158,7 @@ def unitree_g1_supermimic_env_cfg(
       },
     ),
     "foot_friction": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=geom_friction,
       params={
         "asset_cfg": SceneEntityCfg(

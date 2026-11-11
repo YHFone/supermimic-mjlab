@@ -397,13 +397,23 @@ class MotionLibraryCommand(CommandTerm):
     pre_frames: torch.Tensor,
     rewards: torch.Tensor,
     terminated: torch.Tensor,
-    timed_out: torch.Tensor,
+    truncated: torch.Tensor,
   ) -> bool:
-    """Feed one env step to the return sampler; True when ``V`` was updated."""
+    """Feed one env step to the return sampler; True when ``V`` was updated.
+
+    Official split: a step that both fails and times out counts as a time-out,
+    and a clip-end truncation is tracked separately from other time-outs
+    (``supermimic_runner.py:640-653``).
+    """
     if self.cfg.sampling_mode != "return":
       return False
+    clip_end = self.is_motion_end()
     return self.sampler.record(
-      pre_frames, rewards, terminated, self.is_motion_end(), timed_out
+      pre_frames,
+      rewards,
+      terminated & ~truncated,
+      clip_end,
+      truncated & ~clip_end,
     )
 
   def reset_to_frame(self, env_ids: torch.Tensor, clip_id: int, frame: int) -> None:

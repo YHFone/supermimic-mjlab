@@ -1,5 +1,22 @@
 # 审计：本地实现 vs 官方 `SuperMimic-GenCoord-G1`
 
+> **实施状态（2026-11-11，本次提交）**
+>
+> | 项 | 状态 |
+> |---|---|
+> | D1 DR 采样模式 `reset→startup` | ✅ 已改 |
+> | D2 TF32 | ✅ 已移除（走 PyTorch 默认 fp32） |
+> | D3 RSI 失败/超时优先级 | ✅ 已改（`terminated & ~truncated`、`truncated & ~clip_end`） |
+> | D4 UTD 相位 | ✅ 已改为官方循环（每迭代 1 步 + `Ratio(0.4)` 触发） |
+> | D5 RSI 分箱 | ✅ `bin_count = T//50 + 1`，连续映射 |
+> | D7 种子 | ✅ 默认 `seed=None`（不设种子），`--seed` 仍可显式指定 |
+> | D8 critic perm | ✅ 每次更新只采样一次排列 |
+> | D10 episode length 口径 | ✅ 主指标改为官方口径（失败/500 步 flush，deque-100），另加 `Mean true episode length` |
+> | D6 auto_reset / 奖励来源 | ⏸ 保留（数据等价，见 §2.6 说明） |
+> | D9 compile / CUDA graph | ⏸ 保留（纯性能） |
+> | D11 观测组 / state 列序 | ⏸ 保留（内部布局，rep 接口相同） |
+> | D12 checkpoint 格式 | ⏸ 保留（三文件 vs 单文件，纯格式） |
+
 > 范围：官方 `supermimic_ws/supermimic` + `supermimic_ws/mjlab_research`（fork）的 GenCoord 训练线。
 > 排除：velocity 任务槽、MaxCoord 表示、PPO 基线（按要求不在范围内）。
 > 日期：2026-11-11。本地对应 commit `343062a` 之后的工作树。

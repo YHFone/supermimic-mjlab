@@ -25,17 +25,14 @@ class SuperMimicCfg:
   # Data collection.
   buffer_steps: int = 1000
   """Replay-buffer length in simulator steps per environment."""
-  num_steps_per_env: float = 2.5
-  """Simulator steps collected per collect/fit/imagine round.
+  replay_ratio: int = 16
+  """Official update-to-data factor.
 
-  The official runner derives the same value from
-  ``N / num_batches / batch_size / horizon * replay_ratio``
-  (= 4096/10/2048/8 × 16 = 0.4 updates per step, i.e. 2.5 steps per update).
-  The trainer accumulates the fractional part, collecting 2 and 3 steps
-  alternately.
+  One training round fires with probability
+  ``num_envs / wm_updates_per_iter / wm_batch_size / wm_window * replay_ratio``
+  (4096/10/2048/8 × 16 = 0.4), so ``num_iterations`` counts simulator steps and
+  a round runs on ~40 % of them.
   """
-  utd: float | None = None
-  """Update-to-data ratio; overrides ``num_steps_per_env`` when set."""
   warmup_steps: int = 64
   action_noise: float = 0.1
 
@@ -108,21 +105,15 @@ class SuperMimicCfg:
   save_interval: int = 1000
   log_dir: str = "logs/supermimic"
   experiment_name: str = "g1_supermimic"
-  seed: int = 0
+  seed: int | None = None
+  """Random seed.  ``None`` (official default) leaves seeding to the environment."""
   device: str = "cuda:0"
   compile: bool = False
   """Compile the differentiable-kinematics layer with ``torch.compile``."""
-  use_tf32: bool = True
   extra: dict = field(default_factory=dict)
 
   def __post_init__(self) -> None:
-    if self.utd is not None:
-      if self.utd <= 0:
-        raise ValueError("utd must be positive")
-      self.num_steps_per_env = 1.0 / self.utd
-    elif self.num_steps_per_env <= 0:
-      raise ValueError("num_steps_per_env must be positive")
-    else:
-      self.utd = 1.0 / self.num_steps_per_env
+    if self.replay_ratio <= 0:
+      raise ValueError("replay_ratio must be positive")
     if self.termination_softness <= 0:
       raise ValueError("termination_softness must be positive")

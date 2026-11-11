@@ -20,7 +20,7 @@ from supermimic.mdp.features import GoalFeatures
 def test_schedule_and_collection():
   cfg = unitree_g1_supermimic_cfg()
   assert cfg.buffer_steps == 1000
-  assert cfg.num_steps_per_env == 2.5 and cfg.utd == 0.4
+  assert cfg.replay_ratio == 16
   assert cfg.action_noise == 0.1
   assert cfg.goal_frames == 10 and cfg.goal_stride == 5
   assert cfg.num_iterations == 1_000_000

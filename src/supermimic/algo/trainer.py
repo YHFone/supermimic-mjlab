@@ -19,6 +19,7 @@ import json
 import math
 import statistics
 import time
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -98,15 +99,12 @@ class SuperMimicTrainer:
     self.iteration = 0
     self.env_steps = 0
     self._rng = torch.Generator(device=self.device)
-    self._rng.manual_seed(cfg.seed)
-
-    torch.manual_seed(cfg.seed)
-    if torch.cuda.is_available():
-      torch.cuda.manual_seed_all(cfg.seed)
-    if cfg.use_tf32 and torch.cuda.is_available():
-      torch.backends.cuda.matmul.allow_tf32 = True
-      torch.backends.cudnn.allow_tf32 = True
-      torch.set_float32_matmul_precision("high")
+    # Official: no seeding unless the environment is given one.
+    if cfg.seed is not None:
+      self._rng.manual_seed(int(cfg.seed))
+      torch.manual_seed(int(cfg.seed))
+      if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(cfg.seed))
 
     command = env.command_manager.get_term("motion")
     assert isinstance(command, MotionLibraryCommand)
@@ -221,6 +219,13 @@ class SuperMimicTrainer:
     self.episode_length = torch.zeros(
       env.num_envs, dtype=torch.long, device=self.device
     )
+    # Official episode-length metric: flush on a hard failure or when the cap is
+    # reached, then average the last 100 flushes (supermimic/utils/logger.py:56-66).
+    self._fail_len = torch.zeros(env.num_envs, device=self.device)
+    self._fail_rew = torch.zeros(env.num_envs, device=self.device)
+    self._fail_len_buf: deque[float] = deque(maxlen=100)
+    self._fail_rew_buf: deque[float] = deque(maxlen=100)
+    self._max_episode_length = int(env.max_episode_length)
     self.reward_term_names = list(TRACKING_REWARD_TERMS)
     self._term_sums = torch.zeros(len(self.reward_term_names), device=self.device)
     self._term_steps = 0
@@ -320,6 +325,16 @@ class SuperMimicTrainer:
       self._step_reward_count += reward.numel()
       self._action_std_sum += float(action.std(dim=1).mean().item())
       self._action_std_steps += 1
+
+      self._fail_len += 1
+      self._fail_rew += reward
+      flush = terminated | (self._fail_len >= self._max_episode_length)
+      flush_ids = flush.nonzero(as_tuple=False).squeeze(-1)
+      if flush_ids.numel() > 0:
+        self._fail_len_buf.extend(self._fail_len[flush_ids].cpu().tolist())
+        self._fail_rew_buf.extend(self._fail_rew[flush_ids].cpu().tolist())
+        self._fail_len[flush_ids] = 0.0
+        self._fail_rew[flush_ids] = 0.0
 
       self.episode_return += reward
       self.episode_length += 1
@@ -654,8 +669,9 @@ class SuperMimicTrainer:
     context_flat = context.repeat(horizon, 1)
     n = rep_flat.shape[0]
     losses = []
+    perm = torch.randperm(n // cfg.critic_minibatches * cfg.critic_minibatches,
+                           device=self.device)
     for _ in range(cfg.critic_epochs):
-      perm = torch.randperm(n, device=self.device)
       chunks = torch.chunk(perm, cfg.critic_minibatches)
       for idx in chunks:
         if idx.numel() == 0:
@@ -718,18 +734,30 @@ class SuperMimicTrainer:
     self._start_env_steps = self.env_steps
     self._collect(cfg.warmup_steps)
     self._precompile_kinematics()
+    # Official schedule: one env step per iteration, a training round fires with
+    # probability `ratio` = N / num_batches / batch / horizon * replay_ratio.
+    should_train = Ratio(
+      self.env.num_envs
+      / max(1, cfg.wm_updates_per_iter)
+      / max(1, cfg.wm_batch_size)
+      / max(1, cfg.wm_window)
+      * cfg.replay_ratio
+    )
     while self.iteration < cfg.num_iterations:
       iteration_start = time.time()
       logs: dict[str, float] = {}
       t_collect = time.perf_counter()
-      self._step_accumulator += cfg.num_steps_per_env
-      n_steps = int(math.floor(self._step_accumulator))
-      self._step_accumulator -= n_steps
-      logs.update(self._collect(n_steps))
+      logs.update(self._collect(1))
       t_world_model = time.perf_counter()
-      logs.update(self._update_world_model())
+      train_rounds = 0
+      for _ in range(should_train(self.iteration)):
+        if int(self.buffer.count.min().item()) < cfg.wm_window:
+          continue
+        logs.update(self._update_world_model())
+        logs.update(self._update_policy())
+        train_rounds += 1
       t_policy = time.perf_counter()
-      logs.update(self._update_policy())
+      logs["train/rounds"] = float(train_rounds)
       t_end = time.perf_counter()
       logs["time/collect"] = t_world_model - t_collect
       logs["time/world_model"] = t_policy - t_world_model
@@ -791,31 +819,38 @@ class SuperMimicTrainer:
     )
     term_means = (self._term_sums / max(1, self._term_steps)).cpu().tolist()
 
+    def g(key: str) -> float:
+      return float(logs.get(key, 0.0))
+
     lines = [
       f"{'#' * width}\n",
       f"{f' Learning iteration {it}/{total} ':^{width}}\n\n",
       line("Total steps", f"{self.env_steps:,}"),
       line("Steps per second", f"{fps:.0f}"),
-      line("Collection time", f"{logs['time/collect']:.3f}s"),
-      line("World-model time", f"{logs['time/world_model']:.3f}s"),
-      line("Policy time", f"{logs['time/policy']:.3f}s"),
-      line("Mean world model loss", f"{logs['world_model/loss']:.4f}"),
+      line("Collection time", f"{g('time/collect'):.3f}s"),
+      line("World-model time", f"{g('time/world_model'):.3f}s"),
+      line("Policy time", f"{g('time/policy'):.3f}s"),
+      line("Mean world model loss", f"{g('world_model/loss'):.4f}"),
       line(
         "Mean world model 7-step error",
-        f"{logs['world_model/window_error']:.4f}",
+        f"{g('world_model/window_error'):.4f}",
       ),
-      line("Mean critic loss", f"{logs['critic/loss']:.4f}"),
-      line("Mean policy loss", f"{logs['policy/loss']:.4f}"),
-      line("Mean policy objective", f"{logs['policy/objective']:.4f}"),
-      line("Mean imagined reward", f"{logs['policy/reward']:.4f}"),
+      line("Mean critic loss", f"{g('critic/loss'):.4f}"),
+      line("Mean policy loss", f"{g('policy/loss'):.4f}"),
+      line("Mean policy objective", f"{g('policy/objective'):.4f}"),
+      line("Mean imagined reward", f"{g('policy/reward'):.4f}"),
       line("Mean episode reward", mean_episode_reward),
-      line("Mean episode length", mean_episode_length),
+      line(
+        "Mean episode length",
+        f"{statistics.mean(self._fail_len_buf):.2f}" if self._fail_len_buf else "n/a",
+      ),
+      line("Mean true episode length", mean_episode_length),
       line("Mean normalized return", mean_normalized),
       line("Mean reward per step", f"{mean_step_reward:.4f}"),
       line("Mean action std", f"{mean_action_std:.4f}"),
       line("Success rate", success_rate),
-      line("Done rate", f"{logs['collect/done_rate']:.4f}"),
-      line("Bad gradients", f"{int(logs['policy/bad_grads'])}"),
+      line("Done rate", f"{g('collect/done_rate'):.4f}"),
+      line("Bad gradients", f"{int(g('policy/bad_grads'))}"),
       line("Learning rate", f"{self.actor_optimizers[0].param_groups[0]['lr']:.2e}"),
     ]
     for name, value in zip(self.reward_term_names, term_means, strict=True):
@@ -936,6 +971,24 @@ class SuperMimicTrainer:
   def close(self) -> None:
     if self._writer is not None:
       self._writer.close()
+
+
+class Ratio:
+  """Fractional scheduler: returns how many repeats are due at ``step``."""
+
+  def __init__(self, ratio: float) -> None:
+    self._ratio = float(ratio)
+    self._prev: float | None = None
+
+  def __call__(self, step: int) -> int:
+    if self._ratio <= 0:
+      return 0
+    if self._prev is None:
+      self._prev = float(step)
+      return 1
+    repeats = int((step - self._prev) * self._ratio)
+    self._prev += repeats / self._ratio
+    return repeats
 
 
 def _set_requires_grad(parameters, value: bool) -> list[bool]:

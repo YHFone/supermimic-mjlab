@@ -110,11 +110,12 @@ class ReturnSampler:
       probs = self._uniform()
     probs = probs / probs.sum()
     bins = torch.multinomial(probs, n, replacement=True)
-    lo = bins * self.frame_count // self.bin_count
-    hi = ((bins + 1) * self.frame_count) // self.bin_count
-    span = (hi - lo).clamp_min(1)
-    offsets = (torch.rand(n, device=self.device) * span.float()).long()
-    frames = (lo + offsets).clamp(max=self.frame_count - 1)
+    # Official mapping: a continuous position inside the bin, rescaled to the
+    # global timeline (mjlab_research/.../commands.py:231-240).
+    u = torch.rand(n, device=self.device)
+    frames = (
+      (bins.float() + u) / self.bin_count * (self.frame_count - 1)
+    ).long().clamp(max=self.frame_count - 1)
     clip_ids = self.frame_clip[frames]
     local = frames - self.clip_offsets[clip_ids]
     return clip_ids, local

@@ -14,7 +14,7 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
   """Create the training configuration for the Unitree G1 SuperMimic task."""
   return SuperMimicCfg(
     buffer_steps=1000,
-    num_steps_per_env=2.5,
+    replay_ratio=16,
     warmup_steps=64,
     action_noise=0.1,
     goal_frames=10,
@@ -30,7 +30,6 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
     policy_batch_size=4096,
     policy_chunk_size=4096,
     compile=True,
-    use_tf32=True,
     encoder_hidden_dims=(2048, 1024, 512, 256),
     decoder_hidden_dims=(2048, 1024, 512, 256),
     critic_hidden_dims=(256, 128),
@@ -49,6 +48,5 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
     save_interval=1000,
     log_dir="logs/supermimic",
     experiment_name="g1_supermimic",
-    seed=0,
     device="cuda:0",
   )

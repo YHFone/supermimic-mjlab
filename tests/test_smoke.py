@@ -67,7 +67,7 @@ def test_training_smoke(tmp_path):
   env = ManagerBasedRlEnv(env_cfg, device="cuda:0")
   cfg = SuperMimicCfg(
     buffer_steps=32,
-    num_steps_per_env=1.0,
+    replay_ratio=16,
     warmup_steps=20,
     wm_batch_size=8,
     wm_updates_per_iter=1,

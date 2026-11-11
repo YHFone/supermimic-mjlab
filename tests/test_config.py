@@ -18,7 +18,8 @@ def test_g1_rl_cfg_matches_official_defaults():
   assert cfg.gamma == 0.99 and cfg.lam == 0.95
   assert cfg.num_iterations == 1_000_000
   assert cfg.lr_decay_iters == 0
-  assert cfg.utd == 0.4 and cfg.num_steps_per_env == 2.5
+  assert cfg.replay_ratio == 16
+  assert cfg.seed is None
   assert cfg.buffer_steps == 1000
   assert cfg.wm_batch_size == 2048
   assert cfg.wm_updates_per_iter == 10
