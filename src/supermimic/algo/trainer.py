@@ -179,11 +179,17 @@ class SuperMimicTrainer:
       device=self.device,
     )
 
+    action_cfg = env.cfg.actions["joint_pos"]
     action_scale = torch.as_tensor(
-      self.env.action_manager.get_term("joint_pos").cfg.scale,
-      dtype=torch.float32,
-      device=self.device,
+      action_cfg.scale, dtype=torch.float32, device=self.device
     ).flatten()
+    if action_scale.numel() == 1:
+      action_scale = action_scale.expand(self.spec.num_joints)
+    if action_scale.numel() != self.spec.num_joints:
+      raise ValueError(
+        f"action scale has {action_scale.numel()} entries, expected "
+        f"{self.spec.num_joints}"
+      )
     self.world_model = WorldModel(
       self.representation,
       WorldModelCfg(
