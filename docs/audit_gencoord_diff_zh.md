@@ -13,7 +13,7 @@
 > | D8 critic perm | ✅ 每次更新只采样一次排列 |
 > | D10 episode length 口径 | ✅ 主指标改为官方口径（失败/500 步 flush，deque-100），另加 `Mean true episode length` |
 > | D6 auto_reset / 奖励来源 | ✅ 已改：`auto_reset=True`，buffer/RSI 用 env 侧奖励，解析奖励只用于想象；尾部奖励日志改读 `extras["Episode_Reward/*"]` |
-> | D9 compile / CUDA graph | 🟡 部分：已 compile 想象步（`_imagine_step`，对应官方 `torch.compile(wm_env.step)`）；**CUDA graph 未做**（需去掉更新路径里的 `.item()` 同步并把数据拷入静态 buffer，且必须上卡验证） |
+> | D9 compile / CUDA graph | ✅ 已改：想象步 `torch.compile`；策略更新用 `CapturedUpdate`（`algo/capture.py`，warmup 3 次后捕获、之后 replay），在本机 4090 上验证 `captured=True`，eager/捕获两条路径指标一致；优化器改为 capturable Adam + device lr |
 > | D11 观测组 / state 列序 | ⏸ 保留（内部布局，rep 接口相同） |
 > | D12 checkpoint 格式 | ⏸ 保留（三文件 vs 单文件，纯格式） |
 > | **A1** `warmup_steps=64` | ✅ 已改为 0（官方首个训练轮在 buffer 满 8 帧时） |

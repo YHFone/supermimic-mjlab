@@ -109,6 +109,8 @@ class SuperMimicCfg:
   seed: int | None = None
   """Random seed.  ``None`` (official default) leaves seeding to the environment."""
   device: str = "cuda:0"
+  use_cuda_graph: bool = True
+  """Capture the learner updates in a CUDA graph (official behaviour)."""
   compile: bool = False
   """Compile the differentiable-kinematics layer with ``torch.compile``."""
   extra: dict = field(default_factory=dict)

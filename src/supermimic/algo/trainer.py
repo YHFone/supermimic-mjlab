@@ -28,6 +28,7 @@ import torch
 from torch import nn
 
 from supermimic.algo.buffer import ReplayBuffer
+from supermimic.algo.capture import CapturedUpdate, graph_state
 from supermimic.algo.config import SuperMimicCfg
 from supermimic.algo.networks import (
   ActorCritic,
@@ -73,9 +74,14 @@ def build_optimizers(
   ]
   hidden_ids = {id(p) for p in hidden}
   rest = [p for m in modules for p in m.parameters() if id(p) not in hidden_ids]
-  fused = any(p.is_cuda for p in rest)
+  cuda = any(p.is_cuda for p in rest)
+  # A device-tensor lr can be updated in place, which keeps optimizer.step()
+  # capture-safe (official learner_utils.py does the same).
+  lr_arg = torch.tensor(lr, device=rest[0].device) if cuda and rest else lr
   optimizers: list[torch.optim.Optimizer] = [
-    torch.optim.Adam(rest, lr=lr, betas=betas, fused=fused)
+    torch.optim.Adam(
+      rest, lr=lr_arg, betas=betas, fused=cuda, capturable=cuda
+    )
   ]
   if hidden and hasattr(torch.optim, "Muon"):
     optimizers.append(
@@ -215,6 +221,16 @@ class SuperMimicTrainer:
       [self.actor_critic.critic], cfg.critic_lr
     )
 
+    self._graph_state_fn = lambda: graph_state(
+      [self.actor_critic, self.world_model, self.representation],
+      [*self.actor_optimizers, *self.critic_optimizers],
+    )
+    if cfg.use_cuda_graph and torch.cuda.is_available():
+      self._policy_step = CapturedUpdate(
+        self._policy_update_from, self._graph_state_fn, warmup=3
+      )
+    else:
+      self._policy_step = self._policy_update_from
     self.last_action = torch.zeros(
       env.num_envs, self.spec.action_dim, device=self.device
     )
@@ -512,156 +528,165 @@ class SuperMimicTrainer:
     )
     return next_aux, next_rep, reward, term_prob
 
-  def _update_policy(self) -> dict[str, float]:
-    cfg = self.cfg
-    total = cfg.policy_batch_size
-    starts = self._sample_imagination_starts(total)
-    chunk = max(1, min(cfg.policy_chunk_size, total))
+  def _policy_inputs(self, batch_size: int) -> dict[str, torch.Tensor]:
+    starts = self._sample_imagination_starts(batch_size)
+    return {
+      "state": starts["state"],
+      "context": starts["context"],
+      "clip_ids": starts["clip_ids"],
+      "time_steps": starts["time_steps"],
+      "prev_action": starts["prev_action"],
+    }
 
+  def _policy_update_from(
+    self, inputs: dict[str, torch.Tensor]
+  ) -> dict[str, torch.Tensor]:
+    """Rollout + actor step + critic fit; capture-safe (no host syncs)."""
+    cfg = self.cfg
+    state_in = inputs["state"]
+    total = state_in.shape[0]
+    chunk = max(1, min(cfg.policy_chunk_size, total))
     _set_requires_grad(self.world_model.parameters(), False)
     _set_requires_grad(self.actor_critic.critic.parameters(), False)
     for optimizer in self.actor_optimizers:
-      optimizer.zero_grad(set_to_none=True)
+      # In-place zeroing (not ``set_to_none``): the zeroing kernels are part of
+      # the captured graph, so each replay starts from zero gradients.
+      optimizer.zero_grad()
 
-    all_aux: list[list[torch.Tensor]] = []
     all_rep: list[list[torch.Tensor]] = []
     all_goals: list[list[torch.Tensor]] = []
     all_rewards: list[list[torch.Tensor]] = []
     all_terms: list[list[torch.Tensor]] = []
     all_contexts: list[torch.Tensor] = []
-    objective_value = 0.0
-    reward_sum_value = 0.0
-    term_prob_value = 0.0
-    loss_value = 0.0
-    bad_grads = 0
+    objective_acc = state_in.new_zeros(())
+    reward_acc = state_in.new_zeros(())
+    term_acc = state_in.new_zeros(())
+    loss_acc = state_in.new_zeros(())
 
     for start_index in range(0, total, chunk):
       end_index = min(start_index + chunk, total)
       weight = (end_index - start_index) / total
-      part = {k: v[start_index:end_index] for k, v in starts.items()}
-      aux = part["aux"]
-      rep = part["rep"]
-      context = part["context"]
-      clip_ids = part["clip_ids"]
-      time_steps = part["time_steps"]
-      prev_action = part["prev_action"]
-      obs = part["obs"]
+      state = state_in[start_index:end_index]
+      context = inputs["context"][start_index:end_index]
+      clip_ids = inputs["clip_ids"][start_index:end_index]
+      time_steps = inputs["time_steps"][start_index:end_index]
+      prev_action = inputs["prev_action"][start_index:end_index]
+      rep = self.representation.represent(state)
+      aux = self.representation.extract_aux_state(state)
+      obs = rep
 
       wm_goal, actor_goal = self._goal_for(clip_ids, time_steps, aux)
-      chunk_aux: list[torch.Tensor] = [aux]
       chunk_rep: list[torch.Tensor] = [rep]
       chunk_goals: list[tuple[torch.Tensor, torch.Tensor]] = [(wm_goal, actor_goal)]
       chunk_rewards: list[torch.Tensor] = []
       chunk_terms: list[torch.Tensor] = []
       times = time_steps
-      with torch.enable_grad():
-        for _t in range(cfg.horizon):
-          action = self.actor_critic.act(obs, actor_goal)
-          reference = _squeeze(self.library.gather(clip_ids, times, 1))
-          next_aux, next_rep, reward, term_prob = self._imagine_step(
-            aux, rep, action, prev_action, context, reference
-          )
-          times = times + 1
-          wm_goal, actor_goal = self._goal_for(clip_ids, times, next_aux)
-          chunk_rewards.append(reward)
-          chunk_terms.append(term_prob)
-          chunk_aux.append(next_aux)
-          chunk_rep.append(next_rep)
-          chunk_goals.append((wm_goal, actor_goal))
-          aux, rep = next_aux, next_rep
-          prev_action = action
-          obs = next_rep
-
-        reward_sum = torch.zeros_like(chunk_rewards[0])
-        survival = torch.ones_like(chunk_rewards[0])
-        for t, r in enumerate(chunk_rewards):
-          reward_sum = reward_sum + (self.gamma**t) * survival * r
-          survival = survival * (1.0 - chunk_terms[t])
-        if self.policy_mode == "actor-critic":
-          wm_goal_H, _ = chunk_goals[-1]
-          bootstrap = self.actor_critic.value(chunk_rep[-1], wm_goal_H, context)
-        else:
-          # Official ``BpttPolicyLearner._bootstrap`` returns 0: no critic, the
-          # return is simply truncated at the horizon.
-          bootstrap = torch.zeros_like(reward_sum)
-        objective = reward_sum + (self.gamma**cfg.horizon) * survival * bootstrap
-        loss = -objective.mean() * weight
-
-      if torch.isfinite(loss):
-        loss.backward()
-        bad_grads += sum(
-          int((~torch.isfinite(p.grad)).sum().item())
-          for p in self.actor_params
-          if p.grad is not None
+      for _t in range(cfg.horizon):
+        action = self.actor_critic.act(obs, actor_goal)
+        reference = _squeeze(self.library.gather(clip_ids, times, 1))
+        next_aux, next_rep, reward, term_prob = self._imagine_step(
+          aux, rep, action, prev_action, context, reference
         )
-      else:
-        bad_grads = -1
-      objective_value += float(objective.mean().item()) * weight
-      reward_sum_value += float(reward_sum.mean().item()) * weight
-      term_prob_value += float(torch.stack(chunk_terms).mean().item()) * weight
-      loss_value += float(loss.item())
+        times = times + 1
+        wm_goal, actor_goal = self._goal_for(clip_ids, times, next_aux)
+        chunk_rewards.append(reward)
+        chunk_terms.append(term_prob)
+        chunk_rep.append(next_rep)
+        chunk_goals.append((wm_goal, actor_goal))
+        aux, rep = next_aux, next_rep
+        prev_action = action
+        obs = next_rep
 
-      all_aux.append([s.detach() for s in chunk_aux])
-      all_rep.append([s.detach() for s in chunk_rep])
+      reward_sum = torch.zeros_like(chunk_rewards[0])
+      survival = torch.ones_like(chunk_rewards[0])
+      for t, r in enumerate(chunk_rewards):
+        reward_sum = reward_sum + (self.gamma**t) * survival * r
+        survival = survival * (1.0 - chunk_terms[t])
+      if self.policy_mode == "actor-critic":
+        wm_goal_H, _ = chunk_goals[-1]
+        bootstrap = self.actor_critic.value(chunk_rep[-1], wm_goal_H, context)
+      else:
+        bootstrap = torch.zeros_like(reward_sum)
+      objective = reward_sum + (self.gamma**cfg.horizon) * survival * bootstrap
+      loss = -objective.mean() * weight
+      loss.backward()
+
+      objective_acc = objective_acc + objective.mean().detach() * weight
+      reward_acc = reward_acc + reward_sum.mean().detach() * weight
+      term_acc = term_acc + torch.stack(chunk_terms).mean().detach() * weight
+      loss_acc = loss_acc + loss.detach()
+
+      all_rep.append([t.detach() for t in chunk_rep])
       all_goals.append([(g[0].detach(), g[1].detach()) for g in chunk_goals])
       all_rewards.append([r.detach() for r in chunk_rewards])
       all_terms.append([d.detach() for d in chunk_terms])
       all_contexts.append(context.detach())
 
-    if bad_grads == 0:
-      torch.nn.utils.clip_grad_norm_(self.actor_params, cfg.grad_clip)
-      for p in self.actor_params:
-        if p.grad is not None:
-          p.grad.clamp_(-cfg.grad_clip_elementwise, cfg.grad_clip_elementwise)
-      for optimizer in self.actor_optimizers:
-        optimizer.step()
-    else:
-      for optimizer in self.actor_optimizers:
-        optimizer.zero_grad(set_to_none=True)
+    torch.nn.utils.clip_grad_norm_(self.actor_params, cfg.grad_clip)
+    for p in self.actor_params:
+      if p.grad is not None:
+        p.grad.clamp_(-cfg.grad_clip_elementwise, cfg.grad_clip_elementwise)
+    for optimizer in self.actor_optimizers:
+      optimizer.step()
 
     _set_requires_grad(self.world_model.parameters(), True)
     _set_requires_grad(self.actor_critic.critic.parameters(), True)
 
     reps = [
-      torch.cat([chunk[t] for chunk in all_rep], dim=0)
-      for t in range(cfg.horizon + 1)
+      torch.cat([chunk[i] for chunk in all_rep], dim=0)
+      for i in range(cfg.horizon + 1)
     ]
     wm_goals = [
-      torch.cat([chunk[t][0] for chunk in all_goals], dim=0)
-      for t in range(cfg.horizon + 1)
+      torch.cat([chunk[i][0] for chunk in all_goals], dim=0)
+      for i in range(cfg.horizon + 1)
     ]
     rewards = [
-      torch.cat([chunk[t] for chunk in all_rewards], dim=0)
-      for t in range(cfg.horizon)
+      torch.cat([chunk[i] for chunk in all_rewards], dim=0)
+      for i in range(cfg.horizon)
     ]
     term_probs = [
-      torch.cat([chunk[t] for chunk in all_terms], dim=0)
-      for t in range(cfg.horizon)
+      torch.cat([chunk[i] for chunk in all_terms], dim=0)
+      for i in range(cfg.horizon)
     ]
     context = torch.cat(all_contexts, dim=0)
     if self.policy_mode == "actor-critic":
-      critic_loss = self._update_critic(
-        reps, wm_goals, rewards, term_probs, context
-      )
+      critic_loss = self._critic_fit_from(reps, wm_goals, rewards, term_probs, context)
     else:
-      critic_loss = 0.0
+      critic_loss = state_in.new_zeros(())
     return {
-      "policy/objective": objective_value,
-      "policy/loss": loss_value,
-      "policy/reward": reward_sum_value,
-      "policy/term_prob": term_prob_value,
-      "policy/bad_grads": float(bad_grads),
-      "critic/loss": critic_loss,
+      "objective": objective_acc,
+      "reward": reward_acc,
+      "term_prob": term_acc,
+      "loss": loss_acc,
+      "critic": critic_loss,
     }
 
-  def _update_critic(
+  def _update_policy(self) -> dict[str, float]:
+    inputs = self._policy_inputs(self.cfg.policy_batch_size)
+    outputs = self._policy_step(inputs)
+    bad_grads = sum(
+      int((~torch.isfinite(p.grad)).sum().item())
+      for p in self.actor_params
+      if p.grad is not None
+    )
+    return {
+      "policy/objective": float(outputs["objective"].item()),
+      "policy/loss": float(outputs["loss"].item()),
+      "policy/reward": float(outputs["reward"].item()),
+      "policy/term_prob": float(outputs["term_prob"].item()),
+      "policy/bad_grads": float(bad_grads),
+      "critic/loss": float(outputs["critic"].item()),
+    }
+
+  def _critic_fit_from(
     self,
     reps: list[torch.Tensor],
     goals: list[torch.Tensor],
     rewards: list[torch.Tensor],
     term_probs: list[torch.Tensor],
     context: torch.Tensor,
-  ) -> float:
+  ) -> torch.Tensor:
+    """GAE critic fit; returns the mean loss as a tensor (capture-safe)."""
     cfg = self.cfg
     horizon = cfg.horizon
     with torch.no_grad():
@@ -676,7 +701,6 @@ class SuperMimicTrainer:
           (1.0 - cfg.lam) * values[t + 1] + cfg.lam * running
         )
         targets[t] = running
-      # Official clamps the GAE returns at v_max as well as the value itself.
       v_max = self.actor_critic.v_max
       targets = [target.clamp(max=v_max) for target in targets]
 
@@ -685,27 +709,25 @@ class SuperMimicTrainer:
     target_flat = torch.cat(targets, dim=0)
     context_flat = context.repeat(horizon, 1)
     n = rep_flat.shape[0]
-    losses = []
-    perm = torch.randperm(n // cfg.critic_minibatches * cfg.critic_minibatches,
-                           device=self.device)
+    minibatches = max(1, cfg.critic_minibatches)
+    perm = torch.randperm(n // minibatches * minibatches, device=self.device)
+    total = rep_flat.new_zeros(())
+    steps = 0
     for _ in range(cfg.critic_epochs):
-      chunks = torch.chunk(perm, cfg.critic_minibatches)
-      for idx in chunks:
-        if idx.numel() == 0:
-          continue
+      for idx in torch.chunk(perm, minibatches):
         value = self.actor_critic.value(rep_flat[idx], goal_flat[idx], context_flat[idx])
         loss = torch.mean((value - target_flat[idx]) ** 2)
         for optimizer in self.critic_optimizers:
-          optimizer.zero_grad(set_to_none=True)
-        if torch.isfinite(loss):
-          loss.backward()
-          torch.nn.utils.clip_grad_norm_(
-            self.actor_critic.critic.parameters(), cfg.grad_clip
-          )
-          for optimizer in self.critic_optimizers:
-            optimizer.step()
-        losses.append(float(loss.item()))
-    return float(torch.tensor(losses).mean().item()) if losses else 0.0
+          optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+          self.actor_critic.critic.parameters(), cfg.grad_clip
+        )
+        for optimizer in self.critic_optimizers:
+          optimizer.step()
+        total = total + loss.detach()
+        steps += 1
+    return total / max(1, steps)
 
   # ------------------------------------------------------------------
   # training loop
@@ -950,7 +972,10 @@ class SuperMimicTrainer:
     ):
       for optimizer in optimizers:
         for group in optimizer.param_groups:
-          group["lr"] = base * scale
+          if torch.is_tensor(group["lr"]):
+            group["lr"].fill_(base * scale)
+          else:
+            group["lr"] = base * scale
 
   def save(self, name: str | None = None) -> Path:
     self.log_dir.mkdir(parents=True, exist_ok=True)
