@@ -1,5 +1,13 @@
 # 官方仓库 vs 本仓库对比（SuperMimic）
 
+> **状态（2026-11-11）：已按官方 GenCoord 实现对齐（schema v2）。**
+> 下表记录的是对齐**之前**的差异，保留作为证据链。对齐后的契约：
+> rep/aux/pred = 68/7/35；goal = 67×10（stride 5），actor 640 / critic 670；
+> 终止为解析软阈值；WM 损失为 Bryson 分组加权、评 7 步；`EmpiricalNorm`
+> （`x/(std+1e-2)`、eval no-op）；Muon + Adam；恒定 lr、1e6 迭代；
+> `actor_obs` 默认 `rep_state`（H=1），`proprio`（93×H）为可部署模式。
+> 详见 `docs/align_gencoord_plan_zh.md` 与 `tests/test_official_contract.py`。
+
 > 对象：`/home/zy0028/mjlab_project/supermimic_ws/supermimic`（官方）与 `/home/zy0028/mjlab_project/supermimic-mjlab`（本仓库）。
 > 方法：只读对比。git 历史 / 逐文件阅读 / 去重代码行重合率。未执行任何写操作，未改动源码。
 > 约定：$J=29$（G1 关节）、$B=14$（跟踪体）、$dt=0.02$ s。标注【推断】的结论仅来自静态阅读，未经运行时验证。

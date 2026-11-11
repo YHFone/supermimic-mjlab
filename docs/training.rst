@@ -96,24 +96,41 @@ Training
 
 The G1 defaults live in
 ``src/supermimic/config/g1/rl_cfg.py``
-(``unitree_g1_supermimic_cfg()``) and are **exactly** Table A.5 of the paper:
+(``unitree_g1_supermimic_cfg()``) and follow the **official implementation**
+(``HybridRobotics/supermimic``), which differs from Table A.5 in three places:
 4,096 environments, update-to-data ratio 0.4 (``num_steps_per_env=2.5``
 vectorized simulator steps per collect/fit/imagine round), a replay buffer of
 1,000 steps per environment, ``k=8``, 10 world-model batches of 2,048 windows,
-``H=32``, 4,096 imagined rollouts, 320,000 iterations, cosine decay to 0.03x
-over 250,000 iterations, and Adam at 2e-4 everywhere.
+``H=32``, 4,096 imagined rollouts, **1,000,000 iterations at a constant
+learning rate**, and **Muon on the hidden Linear layers plus Adam** at 2e-4.
 
 ``num_steps_per_env=2.5`` is the number of vectorized simulator steps
 collected per update round (the reciprocal of the 0.4 update-to-data ratio),
 **not** the replay-buffer length.  The buffer is 1,000 steps per environment;
 the trainer accumulates the 0.5 fractional step, so it collects 2 and 3 steps
-alternately and averages 2.5. The observation
-is the 93-dimensional Table A.1 vector with 10 frames of history; the goal is
-the K=10 future reference sequence, 73 dimensions per frame (joint positions
-and velocities, anchor position and orientation, plus the reference root's
-linear and angular velocity in the reference frame); the root
-reward/termination is measured on the pelvis. Every field of
-``SuperMimicCfg`` can still be overridden with ``--sm.<field>``.
+alternately and averages 2.5.
+
+The learned interfaces are the official GenCoord contract (schema v2):
+
+* **state** — the world model consumes the 68-dimensional GenCoord state
+  ``[z, g_b, v_b, w_b, qj, vj]`` plus the auxiliary 7-dimensional root pose,
+  and predicts 35 acceleration-level deltas ``[dv_b, dw_b, dvj]`` which are
+  integrated semi-implicitly with ``substep_coeff=(d+1)/(2d)``;
+* **actor observation** — ``actor_obs_mode="rep_state"`` (default) feeds the
+  68-dimensional state with one frame of history; ``"proprio"`` feeds the
+  93-dimensional sensor vector ``[g_b, omega_b, q-q0, dq, a_{t-1}]`` and is the
+  only mode that can be exported for the real robot;
+* **goal** — 10 reference frames at **stride 5**, 67 numbers per frame
+  (absolute ``qj``, ``vj``, root-relative anchor position, 6D anchor
+  orientation); the actor sees the 640-dimensional version (no anchor
+  position) and the critic the 670-dimensional one;
+* **termination** — analytic ``sigmoid((max(|dz|/0.25, |dg_z|/0.8) - 1)/0.05)``,
+  no learned head;
+* **world-model loss** — Bryson-weighted channel groups
+  (``root_pos 0.01, root_ori 0.02, joint_pos 0.1, joint_vel 3.14``), scored over
+  ``k-1 = 7`` steps; the critic is clamped at ``v_max = 0.1/(1-gamma) = 10``.
+
+Every field of ``SuperMimicCfg`` can still be overridden with ``--sm.<field>``.
 
 ``policy_chunk_size`` (default 4,096) is not a paper parameter: it splits the
 4,096 imagined rollouts into gradient-accumulation chunks so that the

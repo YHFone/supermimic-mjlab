@@ -84,6 +84,7 @@ def unitree_g1_supermimic_env_cfg(
     body_names=TRACKED_BODY_NAMES,
     anchor_body_name="pelvis",
     goal_frames=10,
+    goal_stride=5,
     sampling_mode="start" if play else "return",
     pose_range={
       "x": (-0.05, 0.05),
@@ -100,14 +101,15 @@ def unitree_g1_supermimic_env_cfg(
   cfg.actions = {"joint_pos": joint_pos_action}
   cfg.commands = {"motion": motion_cmd}
 
+  # Official sensor order: gravity and base angular velocity first.
   actuator_terms = {
+    "projected_gravity": ObservationTermCfg(func=env_mdp.projected_gravity),
+    "base_ang_vel": ObservationTermCfg(func=env_mdp.base_ang_vel),
     "joint_pos": ObservationTermCfg(
       func=env_mdp.joint_pos_rel,
       params={"biased": True},
     ),
     "joint_vel": ObservationTermCfg(func=env_mdp.joint_vel_rel),
-    "base_ang_vel": ObservationTermCfg(func=env_mdp.base_ang_vel),
-    "projected_gravity": ObservationTermCfg(func=env_mdp.projected_gravity),
     "last_action": ObservationTermCfg(func=env_mdp.last_action),
   }
   goal_terms = {
@@ -121,7 +123,7 @@ def unitree_g1_supermimic_env_cfg(
       terms=actuator_terms,
       concatenate_terms=True,
       enable_corruption=False,
-      history_length=10,
+      history_length=1,
       flatten_history_dim=True,
     ),
     "goal": ObservationGroupCfg(

@@ -1,12 +1,45 @@
-"""Return-based reset sampling (Appendix D.1 of the SuperMimic paper)."""
+"""Return-based reset sampling, ported from the official SuperMimic runner.
+
+The motion timeline is cut into bins.  ``V[b]`` measures the discounted return
+the policy earns from bin ``b`` on its own rollouts, and turns it into the reset
+distribution
+
+    p(b) = explore/N + (1 - explore - keep) * softmax(-steepness * V[b] / v_max)
+                  + keep * effort[b] / Σ effort
+
+where ``effort`` is the running sum of the *squared* focus each bin received, so
+a bin that stays hard keeps getting practice while one that stops being hard
+fades out.  Statistics update every ``horizon`` recorded steps; a bin's earlier
+samples count at most ``memory`` times against each update, so ``V`` follows the
+current policy instead of averaging over the whole run.
+
+This replaces the previous ``uniform 0.5 / softmax 0.4 / past 0.1`` mixture with
+an EMA of the return, which is *not* the official rule.
+"""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import torch
 
 
-class ReturnBasedSampler:
-  """Samples ``(clip, frame)`` start pairs from a return-weighted mixture."""
+@dataclass
+class ReturnSamplerCfg:
+  gamma: float = 0.99
+  horizon: int = 20
+  """Steps per update; each env's last ``horizon`` steps become return samples."""
+  memory: int = 256
+  """Most samples a bin's ``V`` remembers."""
+  steepness: float = 25.0
+  explore: float = 0.5
+  keep: float = 0.1
+  bin_size_s: float = 1.0
+  max_step_reward: float = 0.1
+
+
+class ReturnSampler:
+  """Samples ``(clip, frame)`` resets from the official return-weighted mixture."""
 
   def __init__(
     self,
@@ -14,122 +47,148 @@ class ReturnBasedSampler:
     frame_dt: float,
     device: str | torch.device,
     *,
-    bin_size_s: float = 1.0,
-    max_return: float = 10.0,
-    uniform_ratio: float = 0.5,
-    softmax_ratio: float = 0.4,
-    past_ratio: float = 0.1,
-    temperature: float = 25.0,
-    ema: float = 0.1,
+    num_envs: int,
+    cfg: ReturnSamplerCfg | None = None,
   ) -> None:
+    self.cfg = cfg or ReturnSamplerCfg()
     self.device = torch.device(device)
     self.dt = frame_dt
-    # Bin length in *frames* (not seconds); the trainer uses ``bin_frames``.
-    self.bin_size = max(1, round(bin_size_s / frame_dt))
-    self.max_return = max_return
-    self.uniform_ratio = uniform_ratio
-    self.softmax_ratio = softmax_ratio
-    self.past_ratio = past_ratio
-    self.temperature = temperature
-    self.ema = ema
-    self.num_clips = int(clip_lengths.shape[0])
-    self.max_bins = int(torch.ceil(clip_lengths.max() * frame_dt / bin_size_s).item())
-
-    clip_ids, bin_starts, bin_ends = [], [], []
     lengths = clip_lengths.cpu().tolist()
-    for clip, length in enumerate(lengths):
-      for b in range((length + self.bin_size - 1) // self.bin_size):
-        start = b * self.bin_size
-        end = min(length, (b + 1) * self.bin_size)
-        if end > start:
-          clip_ids.append(clip)
-          bin_starts.append(start)
-          bin_ends.append(end)
-    self.bin_clip = torch.tensor(clip_ids, dtype=torch.long, device=self.device)
-    self.bin_start = torch.tensor(bin_starts, dtype=torch.long, device=self.device)
-    self.bin_end = torch.tensor(bin_ends, dtype=torch.long, device=self.device)
-    self.num_bins = self.bin_clip.shape[0]
-    bins_per_clip = torch.tensor(
-      [(length + self.bin_size - 1) // self.bin_size for length in lengths],
-      dtype=torch.long,
-      device=self.device,
+    self.clip_lengths = list(lengths)
+    self.frame_count = int(sum(lengths))
+    self.bin_count = max(
+      1, int(round(self.frame_count * frame_dt / self.cfg.bin_size_s))
     )
-    self.bins_per_clip = bins_per_clip
-    self.clip_bin_offset = torch.zeros_like(bins_per_clip)
-    self.clip_bin_offset[1:] = torch.cumsum(bins_per_clip[:-1], dim=0)
+    self.bin_frames = max(1, int(round(self.cfg.bin_size_s / frame_dt)))
+    self.v_max = self.cfg.max_step_reward / (1.0 - self.cfg.gamma)
 
-    self.bin_returns = torch.zeros(self.num_bins, device=self.device)
-    self.past_weights = torch.full(
-      (self.num_bins,), 1.0 / self.num_bins, device=self.device
+    # Global frame index -> clip id, for turning a sampled frame into a reset.
+    self.frame_clip = torch.cat(
+      [
+        torch.full((n,), i, dtype=torch.long)
+        for i, n in enumerate(lengths)
+      ]
+    ).to(self.device)
+    offsets = torch.zeros(len(lengths) + 1, dtype=torch.long)
+    offsets[1:] = torch.cumsum(torch.tensor(lengths, dtype=torch.long), 0)
+    self.clip_offsets = offsets.to(self.device)
+
+    self.value = torch.full((self.bin_count,), self.v_max, device=self.device)
+    self.count = torch.zeros(self.bin_count, device=self.device)
+    self.effort = torch.zeros(self.bin_count, dtype=torch.float64, device=self.device)
+    shape = (num_envs, self.cfg.horizon)
+    self._frames = torch.zeros(shape, dtype=torch.long, device=self.device)
+    self._rewards = torch.zeros(shape, device=self.device)
+    self._terminated = torch.zeros(shape, dtype=torch.bool, device=self.device)
+    self._clip_end = torch.zeros(shape, dtype=torch.bool, device=self.device)
+    self._timed_out = torch.zeros(shape, dtype=torch.bool, device=self.device)
+    self._step = 0
+    self._distribution_t = self._uniform()
+
+  # ------------------------------------------------------------------
+  # sampling
+  # ------------------------------------------------------------------
+  def _uniform(self) -> torch.Tensor:
+    return torch.full(
+      (self.bin_count,), 1.0 / self.bin_count, device=self.device
     )
-    self.visits = torch.zeros(self.num_bins, device=self.device)
-    self._probabilities = self._compute_probabilities()
 
-  def _softmax_weights(self) -> torch.Tensor:
-    scaled = -self.temperature * self.bin_returns / self.max_return
-    return torch.softmax(scaled, dim=0)
+  def _bins(self, frames: torch.Tensor) -> torch.Tensor:
+    return (frames * self.bin_count // self.frame_count).clamp_max(self.bin_count - 1)
 
-  def _compute_probabilities(self) -> torch.Tensor:
-    uniform = torch.full_like(self.bin_returns, 1.0 / self.num_bins)
-    softmax = self._softmax_weights()
-    past = self.past_weights / self.past_weights.sum().clamp_min(1e-12)
-    probs = (
-      self.uniform_ratio * uniform
-      + self.softmax_ratio * softmax
-      + self.past_ratio * past
-    )
-    return probs / probs.sum()
-
-  @property
-  def bin_frames(self) -> int:
-    """Bin length in clip/control frames (alias of :attr:`bin_size`)."""
-    return self.bin_size
+  def _distribution(self) -> torch.Tensor:
+    cfg = self.cfg
+    focus = torch.softmax(-cfg.steepness * self.value / self.v_max, dim=0)
+    self.effort += focus.double().square()
+    keep = (self.effort / self.effort.sum().clamp_min(1e-12)).float()
+    explore = cfg.explore / self.bin_count
+    return explore + (1.0 - cfg.explore - cfg.keep) * focus + cfg.keep * keep
 
   def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-    probs = self._probabilities
-    probs = torch.nan_to_num(probs, nan=0.0)
-    if probs.sum() <= 0:
-      probs = torch.full_like(probs, 1.0 / self.num_bins)
+    probs = torch.nan_to_num(self._distribution_t, nan=0.0)
+    if float(probs.sum()) <= 0:
+      probs = self._uniform()
+    probs = probs / probs.sum()
     bins = torch.multinomial(probs, n, replacement=True)
-    span = (self.bin_end[bins] - self.bin_start[bins]).clamp_min(1)
+    lo = bins * self.frame_count // self.bin_count
+    hi = ((bins + 1) * self.frame_count) // self.bin_count
+    span = (hi - lo).clamp_min(1)
     offsets = (torch.rand(n, device=self.device) * span.float()).long()
-    frames = self.bin_start[bins] + offsets
-    return self.bin_clip[bins], frames
+    frames = (lo + offsets).clamp(max=self.frame_count - 1)
+    clip_ids = self.frame_clip[frames]
+    local = frames - self.clip_offsets[clip_ids]
+    return clip_ids, local
 
-  def update_returns(
+  # ------------------------------------------------------------------
+  # statistics
+  # ------------------------------------------------------------------
+  def record(
     self,
-    clip_ids: torch.Tensor,
-    times: torch.Tensor,
-    returns: torch.Tensor,
-  ) -> None:
-    bin_ids = self._bin_of(clip_ids, times)
-    valid = bin_ids >= 0
-    if not bool(valid.any()):
-      return
-    bin_ids = bin_ids[valid]
-    values = returns[valid].float()
-    # Several environments (or several frames of one rollout) can land in the
-    # same bin.  ``index_copy_`` silently keeps one of them, so aggregate first
-    # and apply one EMA step per unique bin.
-    unique, inverse = torch.unique(bin_ids, return_inverse=True)
-    sums = torch.zeros(unique.numel(), device=self.device).index_add_(
-      0, inverse, values
-    )
-    counts = torch.zeros(unique.numel(), device=self.device).index_add_(
-      0, inverse, torch.ones_like(values)
-    )
-    means = sums / counts.clamp_min(1.0)
-    self.visits.index_add_(0, unique, counts)
-    self.bin_returns.index_copy_(
-      0,
-      unique,
-      self.bin_returns[unique] * (1.0 - self.ema) + means * self.ema,
-    )
-    self.past_weights = 0.9 * self.past_weights + 0.1 * self._softmax_weights()
-    self._probabilities = self._compute_probabilities()
+    frames: torch.Tensor,
+    rewards: torch.Tensor,
+    terminated: torch.Tensor,
+    clip_end: torch.Tensor,
+    timed_out: torch.Tensor,
+  ) -> bool:
+    """Buffer one env step; returns True when the distribution was refreshed."""
+    col = self._step
+    self._frames[:, col] = frames
+    self._rewards[:, col] = rewards
+    self._terminated[:, col] = terminated
+    self._clip_end[:, col] = clip_end
+    self._timed_out[:, col] = timed_out
+    self._step += 1
+    if self._step < self.cfg.horizon:
+      return False
+    self._step = 0
+    self._update()
+    self._distribution_t = self._distribution()
+    return True
 
-  def _bin_of(self, clip_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-    local_bin = times // self.bin_size
-    bin_id = self.clip_bin_offset[clip_ids] + local_bin
-    valid = local_bin < self.bins_per_clip[clip_ids]
-    return torch.where(valid, bin_id, torch.full_like(bin_id, -1))
+  def _dones(self) -> torch.Tensor:
+    return self._terminated | self._clip_end | self._timed_out
+
+  def _returns(self) -> torch.Tensor:
+    gamma = self.cfg.gamma
+    rewards = self._rewards
+    next_frames = (self._frames + 1).clamp(max=self.frame_count - 1)
+    next_value = torch.where(
+      self._terminated,
+      torch.zeros_like(self.value[self._bins(next_frames)]),
+      torch.where(
+        self._clip_end,
+        self.value.mean().expand_as(self.value[self._bins(next_frames)]),
+        self.value[self._bins(next_frames)],
+      ),
+    )
+    dones = self._dones()
+    returns = torch.empty_like(rewards)
+    next_return = next_value[:, -1]
+    for t in reversed(range(self.cfg.horizon)):
+      next_return = torch.where(dones[:, t], next_value[:, t], next_return)
+      returns[:, t] = rewards[:, t] + gamma * next_return
+      next_return = returns[:, t]
+    return returns
+
+  def _update(self) -> None:
+    returns = self._returns()
+    dones = self._dones()
+    num_envs, horizon = dones.shape
+    episode = torch.cumsum(dones.long(), dim=1) - dones.long()
+    envs = torch.arange(num_envs, device=dones.device).unsqueeze(1)
+    key = (envs * horizon + episode) * self.bin_count + self._bins(self._frames)
+    keys, inverse, visits = torch.unique(
+      key.reshape(-1), return_inverse=True, return_counts=True
+    )
+    samples = torch.zeros(keys.numel(), device=returns.device)
+    samples.scatter_add_(0, inverse, returns.reshape(-1))
+    samples /= visits
+    bins = keys % self.bin_count
+    new = torch.zeros_like(self.count).scatter_add_(
+      0, bins, torch.ones_like(samples)
+    )
+    total = torch.zeros_like(self.value).scatter_add_(0, bins, samples)
+    self.count = self.count.clamp(max=self.cfg.memory) + new
+    self.value = torch.where(
+      new > 0, self.value + (total - new * self.value) / self.count, self.value
+    )

@@ -1,4 +1,9 @@
-"""Training configuration for the Unitree G1 SuperMimic task."""
+"""Training configuration for the Unitree G1 SuperMimic task.
+
+Defaults follow the official implementation: GenCoord representation,
+``actor_obs="rep_state"`` with one frame of history, 10 goal frames at stride 5,
+analytic termination, constant learning rate and a 1e6-iteration budget.
+"""
 
 from __future__ import annotations
 
@@ -12,8 +17,11 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
     num_steps_per_env=2.5,
     warmup_steps=64,
     action_noise=0.1,
-    obs_history=10,
+    actor_obs_mode="rep_state",
+    obs_history=1,
     goal_frames=10,
+    goal_stride=5,
+    termination_softness=0.05,
     wm_window=8,
     wm_batch_size=2048,
     wm_updates_per_iter=10,
@@ -37,13 +45,13 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
     critic_minibatches=4,
     grad_clip=1.0,
     grad_clip_elementwise=0.1,
+    use_muon=True,
     norm_interval=10,
     norm_batch_size=65_536,
-    num_iterations=320_000,
-    lr_decay_iters=250_000,
-    lr_final_ratio=0.03,
-    log_interval=1,
-    save_interval=500,
+    num_iterations=1_000_000,
+    lr_decay_iters=0,
+    log_interval=10,
+    save_interval=1000,
     log_dir="logs/supermimic",
     experiment_name="g1_supermimic",
     seed=0,

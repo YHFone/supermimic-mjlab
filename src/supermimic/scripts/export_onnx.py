@@ -23,12 +23,9 @@ import torch
 import tyro
 
 from supermimic.algo.export import (
-  ANCHOR_ORI_DIM,
-  ANCHOR_POS_DIM,
-  ANCHOR_VEL_DIM,
+  GOAL_FRAMES,
+  GOAL_FRAME_STRIDE,
   BASE_OBS_DIM,
-  GOAL_TERMS,
-  OBS_TERMS,
   ActorSpec,
   export_actor_onnx,
   load_actor,
@@ -162,25 +159,25 @@ def _sidecar(
       "action_dim": spec.action_dim,
       "history": spec.history,
       "obs_frame_dim": spec.obs_frame_dim,
-      "goal_frames": spec.goal_frames,
-      "goal_frame_dim": spec.goal_frame_dim,
+      "goal_frames": GOAL_FRAMES,
+      "goal_stride": GOAL_FRAME_STRIDE,
       "num_joints": num_joints,
     },
     "obs_layout": {
-      "terms": list(OBS_TERMS),
+      "terms": ["projected_gravity", "base_ang_vel", "joint_pos_rel", "joint_vel", "last_action"],
       "base_terms_dim": BASE_OBS_DIM,
       "history_order": "oldest -> newest",
-      "note": "joint_pos_rel already includes the encoder bias during training",
+      "note": "joint_pos_rel includes the encoder bias during training",
     },
     "goal_layout": {
-      "terms": list(GOAL_TERMS),
-      "anchor_pos_dim": ANCHOR_POS_DIM,
-      "anchor_ori_dim": ANCHOR_ORI_DIM,
-      "anchor_vel_dim": ANCHOR_VEL_DIM,
-      "frame_offset": 1,
+      "terms": ["content[K x (joint_pos, joint_vel)]", "anchor_ori_rot6d[K x 6]"],
+      "frames": GOAL_FRAMES,
+      "stride": GOAL_FRAME_STRIDE,
+      "block_major": True,
       "note": (
-        "frame t of the clip anchors the position term; goal frame k uses "
-        "reference frame t + 1 + k"
+        "content is absolute joint angles; the window starts at the current "
+        "clip frame and advances by stride; anchor orientation is relative to "
+        "the robot root"
       ),
     },
     "quat_convention": "wxyz",

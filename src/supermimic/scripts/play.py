@@ -116,7 +116,7 @@ class SuperMimicPolicy:
     state = trainer.extractor.state()
     context = trainer.extractor.context()
     bias = context_encoder_bias(context, trainer.spec.num_joints)
-    obs_t = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
+    obs_t = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
     if self._first:
       reset = torch.ones(self.n, dtype=torch.bool, device=trainer.device)
       self._first = False
@@ -132,8 +132,8 @@ class SuperMimicPolicy:
     )
     trainer.history = history
     trainer.last_action = last_action
-    goal = trainer.command.goal()
-    action = self.actor.act(history.reshape(self.n, -1), goal)
+    goal = trainer.command.goal()[1]
+    action = self.actor.act(history, goal)
     trainer.last_action = action
     return action
 
@@ -208,7 +208,7 @@ def _run_video(args: PlayArgs, files) -> None:
   state = trainer.extractor.state()
   context = trainer.extractor.context()
   bias = context_encoder_bias(context, trainer.spec.num_joints)
-  obs = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
+  obs = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
   trainer.history[:] = obs[:, None, :].expand_as(trainer.history)
   trainer.last_action.zero_()
 
@@ -226,8 +226,8 @@ def _run_video(args: PlayArgs, files) -> None:
     for step in range(args.video_length):
       frame_index = args.start_frame + step
       with torch.no_grad():
-        goal = command.goal()
-        action = actor.act(trainer.history.reshape(n, -1), goal)
+        goal = command.goal()[1]
+        action = actor.act(trainer.history, goal)
       _, _, terminated, truncated, _ = env.step(action)
       next_state = trainer.extractor.state()
       reference = trainer.library.gather(command.clip_ids, command.time_steps, 1)
@@ -244,7 +244,7 @@ def _run_video(args: PlayArgs, files) -> None:
         context_encoder_bias(trainer.extractor.context(), trainer.spec.num_joints),
         add_noise=False,
       )
-      trainer.history = torch.cat([trainer.history[:, 1:], next_obs[:, None]], dim=1)
+      trainer.history = trainer.push_history(trainer.history, next_obs)
       policy_frame = env.render()
       if policy_frame is None:
         raise RuntimeError("Environment did not return an RGB frame.")

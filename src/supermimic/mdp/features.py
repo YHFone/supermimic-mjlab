@@ -1,9 +1,25 @@
-"""Differentiable observation and goal features for SuperMimic.
+"""Differentiable observation and goal features (official GenCoord contract).
 
-The policy observation and goal encoder input are pure functions of the robot
-state, the reference motion, and the current root pose.  Keeping them in one
-place guarantees that the observation used during simulator data collection is
-identical to the one used inside imagined world-model rollouts.
+Goal layout follows ``HybridRobotics/supermimic``
+(``representations.py:96-116,213-234``):
+
+* a window of ``N = 10`` reference frames spaced ``stride = 5`` control steps
+  apart, starting at the current frame ``t``;
+* per-frame content ``[joint_pos(J), joint_vel(J)]`` with **absolute** joint
+  angles;
+* ``rel_pos`` — anchor position relative to the **robot root**, in the root
+  frame (world-model goal only);
+* ``rel_ori`` — anchor orientation relative to the robot root, as a 6D rotation
+  (both goals).
+
+Concatenation is block-major, not frame-major::
+
+    wm_goal    = [content (N*2J), rel_pos (N*3), rel_ori (N*6)]   # 670
+    actor_goal = [content (N*2J),              rel_ori (N*6)]   # 640
+
+The actor's proprio layout is also the official one::
+
+    [projected_gravity(3), base_ang_vel(3), joint_pos_rel(J), joint_vel(J), action(J)]
 """
 
 from __future__ import annotations
@@ -19,18 +35,10 @@ from mjlab.utils.lab_api.math import (
   quat_mul,
 )
 
-# State layout.
-ROOT_POS = slice(0, 3)
-ROOT_QUAT = slice(3, 7)
-ROOT_LIN_VEL = slice(7, 10)
-ROOT_ANG_VEL = slice(10, 13)
-JOINT_POS = slice(13, None)  # Joint slice end is set by the robot.
-
-# Goal layout: per reference frame.
-GOAL_ANCHOR_POS = 3
-GOAL_ANCHOR_ORI = 6
-GOAL_LIN_VEL = 3
-GOAL_ANG_VEL = 3
+NUM_GOAL_FRAMES = 10
+GOAL_FRAME_STRIDE = 5
+GOAL_REL_POS_DIM = 3 * NUM_GOAL_FRAMES
+GOAL_REL_ORI_DIM = 6 * NUM_GOAL_FRAMES
 
 
 @dataclass(frozen=True)
@@ -41,10 +49,22 @@ class ProprioNoiseCfg:
   joint_vel: float = 0.5
   base_ang_vel: float = 0.2
   projected_gravity: float = 0.05
+  actions: float = 0.0
+
+  def bounds(self, num_joints: int) -> torch.Tensor:
+    """Half-widths in the official proprio order."""
+    return torch.tensor(
+      [self.projected_gravity] * 3
+      + [self.base_ang_vel] * 3
+      + [self.joint_pos] * num_joints
+      + [self.joint_vel] * num_joints
+      + [self.actions] * num_joints,
+      dtype=torch.float32,
+    )
 
 
 class ProprioFeatures:
-  """Builds the 93-dimensional proprioceptive observation of the paper."""
+  """Builds the 93-dimensional sensor proprio in the official term order."""
 
   def __init__(
     self,
@@ -65,19 +85,11 @@ class ProprioFeatures:
     *,
     add_noise: bool = True,
   ) -> torch.Tensor:
-    """Compute ``o_t`` from a world-model state.
-
-    Args:
-      state: ``(B, 13 + 2 * J)`` state.
-      last_action: ``(B, J)`` previous raw action.
-      encoder_bias: ``(B, J)`` joint calibration offsets, added to the
-        measured joint positions exactly as the simulator's noisy encoder does.
-      add_noise: whether to add the sensor noise of Table A.1.
-    """
-    root_quat = state[:, ROOT_QUAT]
+    """``[gravity, ang_vel, qj_rel, vj, action]`` from a 71-dim state."""
+    root_quat = state[:, 3:7]
     joint_pos = state[:, 13 : 13 + self.num_joints]
     joint_vel = state[:, 13 + self.num_joints :]
-    base_ang_vel_w = state[:, ROOT_ANG_VEL]
+    base_ang_vel_w = state[:, 10:13]
     joint_pos_rel = joint_pos - self.default_joint_pos
     if encoder_bias is not None:
       joint_pos_rel = joint_pos_rel + encoder_bias
@@ -96,7 +108,7 @@ class ProprioFeatures:
         self.noise.projected_gravity, projected_gravity_b
       )
     return torch.cat(
-      [joint_pos_rel, joint_vel, base_ang_vel_b, projected_gravity_b, last_action],
+      [projected_gravity_b, base_ang_vel_b, joint_pos_rel, joint_vel, last_action],
       dim=-1,
     )
 
@@ -106,85 +118,49 @@ def _uniform(scale: float, like: torch.Tensor) -> torch.Tensor:
 
 
 class GoalFeatures:
-  """Builds the K-frame future-reference goal used by the goal encoder.
-
-  The anchor *position* is expressed in the reference's own local frame: frame
-  0 of the gathered window (the current reference frame) supplies the origin.
-  The anchor *orientation* stays relative to the robot's current root
-  orientation.  Each goal frame also carries the reference anchor's linear and
-  angular velocity in that frame, which gives the encoder feed-forward velocity
-  context (an addition relative to the paper's 67-dimensional layout).
-  """
+  """Official goal window: ``N`` strided frames, root-relative anchor."""
 
   def __init__(
     self,
     num_joints: int,
-    default_joint_pos: torch.Tensor,
     anchor_index: int,
-    horizon: int,
+    *,
+    horizon: int = NUM_GOAL_FRAMES,
   ) -> None:
     self.num_joints = num_joints
-    self.default_joint_pos = default_joint_pos
     self.anchor_index = anchor_index
     self.horizon = horizon
-    self.frame_dim = (
-      2 * num_joints
-      + GOAL_ANCHOR_POS
-      + GOAL_ANCHOR_ORI
-      + GOAL_LIN_VEL
-      + GOAL_ANG_VEL
-    )
-    self.dim = horizon * self.frame_dim
+    self.content_dim = horizon * 2 * num_joints
+    self.rel_pos_dim = horizon * 3
+    self.rel_ori_dim = horizon * 6
+    self.wm_dim = self.content_dim + self.rel_pos_dim + self.rel_ori_dim
+    self.actor_dim = self.content_dim + self.rel_ori_dim
 
   def from_reference(
-    self, reference: dict[str, torch.Tensor], root_quat: torch.Tensor
-  ) -> torch.Tensor:
-    """Encode ``(B, K + 1, ...)`` reference frames as the goal.
+    self,
+    reference: dict[str, torch.Tensor],
+    root_pos: torch.Tensor,
+    root_quat: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode ``(B, N, ...)`` reference frames into ``(wm_goal, actor_goal)``."""
+    joint_pos = reference["joint_pos"]  # (B, N, J) absolute
+    joint_vel = reference["joint_vel"]
+    anchor_pos = reference["body_pos"][:, :, self.anchor_index]
+    anchor_quat = reference["body_quat"][:, :, self.anchor_index]
+    batch, horizon = joint_pos.shape[0], joint_pos.shape[1]
 
-    Frame 0 is the current reference frame (``t``) and anchors the position
-    term: frames ``1..K`` are the goal frames ``t + 1 .. t + K``, whose anchor
-    positions are relative to the reference anchor body at ``t`` and expressed
-    in its frame.  The anchor orientations are relative to ``root_quat``, the
-    robot's current root orientation.  Each goal frame also carries the
-    reference anchor's linear and angular velocity in that frame.
-    """
-    ref_pos = reference["body_pos"][:, :, self.anchor_index]  # (B, K + 1, 3)
-    ref_quat = reference["body_quat"][:, :, self.anchor_index]  # (B, K + 1, 4)
-    ref_lin_vel = reference["body_lin_vel"][:, :, self.anchor_index]
-    ref_ang_vel = reference["body_ang_vel"][:, :, self.anchor_index]
-    pos_origin = ref_pos[:, 0]
-    pos_origin_quat = ref_quat[:, 0]
-    ref_pos = ref_pos[:, 1:]
-    ref_quat = ref_quat[:, 1:]
-    ref_lin_vel = ref_lin_vel[:, 1:]
-    ref_ang_vel = ref_ang_vel[:, 1:]
-    batch, horizon = ref_pos.shape[0], ref_pos.shape[1]
-
-    pos_origin_e = pos_origin[:, None, :]
-    pos_origin_quat_e = pos_origin_quat[:, None, :].expand(batch, horizon, 4)
-    anchor_pos_b = quat_apply_inverse(
-      pos_origin_quat_e, ref_pos - pos_origin_e
-    )
+    root_pos_e = root_pos[:, None, :].expand(batch, horizon, 3)
     root_quat_e = root_quat[:, None, :].expand(batch, horizon, 4)
-    anchor_quat_b = quat_mul(quat_inv(root_quat_e), ref_quat)
-    anchor_ori_b = matrix_from_quat(anchor_quat_b)[..., :2].reshape(batch, horizon, 6)
-    lin_vel_b = quat_apply_inverse(ref_quat, ref_lin_vel)
-    ang_vel_b = quat_apply_inverse(ref_quat, ref_ang_vel)
-    joint_pos = (
-      reference["joint_pos"][:, 1:] - self.default_joint_pos[None, None, :]
-    )
-    goal = torch.cat(
-      [
-        joint_pos,
-        reference["joint_vel"][:, 1:],
-        anchor_pos_b,
-        anchor_ori_b,
-        lin_vel_b,
-        ang_vel_b,
-      ],
-      dim=-1,
-    )
-    return goal.reshape(batch, self.dim)
+    rel_pos = quat_apply_inverse(root_quat_e, anchor_pos - root_pos_e)
+    rel_ori_quat = quat_mul(quat_inv(root_quat_e), anchor_quat)
+    rel_ori = matrix_from_quat(rel_ori_quat)[..., :2].reshape(batch, horizon, 6)
+
+    content = torch.cat([joint_pos, joint_vel], dim=-1).reshape(batch, -1)
+    rel_pos_flat = rel_pos.reshape(batch, -1)
+    rel_ori_flat = rel_ori.reshape(batch, -1)
+    wm_goal = torch.cat([content, rel_pos_flat, rel_ori_flat], dim=-1)
+    actor_goal = torch.cat([content, rel_ori_flat], dim=-1)
+    return wm_goal, actor_goal
 
 
 def make_state(
@@ -195,7 +171,7 @@ def make_state(
   joint_pos: torch.Tensor,
   joint_vel: torch.Tensor,
 ) -> torch.Tensor:
-  """Assemble the world-model state vector."""
+  """Assemble the full state ``[p, q, v, ω, qj, vj]`` (local column order)."""
   return torch.cat(
     [root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos, joint_vel],
     dim=-1,

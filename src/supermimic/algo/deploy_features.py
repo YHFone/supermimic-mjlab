@@ -7,16 +7,18 @@ produced from the IMU, the joint encoders, and a reference motion clip, in plain
 ``g1_deploy`` C++ adapter mirrors it operation for operation, and
 ``tests/test_deploy_features.py`` pins it against the training features.
 
-Layouts (``J`` joints, ``H`` history frames, ``K`` goal frames)::
+Layouts (``J`` joints, ``H`` history frames, ``K`` goal frames, stride ``S``)::
 
-    obs  = H * (3 J + 6)      q - q0 | dq | omega_b | g_b | a_{t-1}
-    goal = K * (2 J + 15)     q_ref - q0 | dq_ref | anchor_pos | anchor_ori |
-                              anchor_lin_vel | anchor_ang_vel
+    obs  = H * (3 J + 6)      g_b | omega_b | q - q0 | dq | a_{t-1}
+    goal = K * 2 J + K * 6    q_ref | dq_ref | anchor_ori_root
 
-Clip frame ``t`` anchors the goal: the position terms of goal frame ``k`` are
-relative to the anchor pose at ``t`` and expressed in its frame, and goal frame
-``k`` refers to clip frame ``t + 1 + k``.  Anchor orientations are relative to the
-robot's current root orientation, as in training.
+The goal is block-major, exactly like the official ``actor_goal``: first all
+``K`` frames of ``[q_ref, dq_ref]`` (absolute joint angles, not ``q - q0``),
+then all ``K`` frames of the 6D anchor orientation relative to the robot root.
+The window starts at the current clip frame ``t`` and advances by ``S = 5``
+frames per entry (official ``GOAL_FRAME_STRIDE``).  Only the orientation part
+survives; the anchor position term is world-model/critic-only and is dropped by
+the deployed actor.
 """
 
 from __future__ import annotations
@@ -31,9 +33,13 @@ ANCHOR_ORI_DIM = 6
 ANCHOR_VEL_DIM = 6
 
 
-def goal_frame_dim(num_joints: int) -> int:
-  """Numbers per goal frame: ``2 J + 3 + 6 + 3 + 3``."""
-  return 2 * num_joints + ANCHOR_POS_DIM + ANCHOR_ORI_DIM + ANCHOR_VEL_DIM
+GOAL_FRAMES = 10
+GOAL_FRAME_STRIDE = 5
+
+
+def goal_dim(num_joints: int, horizon: int = GOAL_FRAMES) -> int:
+  """Actor goal width: ``horizon * (2 J + 6)`` (640 for J=29, K=10)."""
+  return horizon * (2 * num_joints + ANCHOR_ORI_DIM)
 
 
 def obs_frame_dim(num_joints: int) -> int:
@@ -169,14 +175,14 @@ def build_observation(
   gravity_body: np.ndarray,
   last_action: np.ndarray,
 ) -> np.ndarray:
-  """One 93-dimensional proprioceptive frame (``3 J + 6``)."""
+  """One 93-dimensional proprioceptive frame: ``g_b | omega | q-q0 | dq | a``."""
   joint_pos = np.asarray(joint_pos, dtype=np.float32)
   return np.concatenate(
     [
+      np.asarray(gravity_body, dtype=np.float32),
+      np.asarray(omega_body, dtype=np.float32),
       joint_pos - np.asarray(default_joint_pos, dtype=np.float32),
       np.asarray(joint_vel, dtype=np.float32),
-      np.asarray(omega_body, dtype=np.float32),
-      np.asarray(gravity_body, dtype=np.float32),
       np.asarray(last_action, dtype=np.float32),
     ]
   ).astype(np.float32)
@@ -186,46 +192,29 @@ def build_goal(
   motion: DeployMotion,
   index: int,
   root_quat: np.ndarray,
-  default_joint_pos: np.ndarray,
-  horizon: int,
+  horizon: int = GOAL_FRAMES,
+  stride: int = GOAL_FRAME_STRIDE,
   yaw_offset: np.ndarray | None = None,
 ) -> np.ndarray:
-  """``horizon * (2 J + 15)`` goal for clip frame ``index``."""
+  """``horizon * (2 J + 6)`` actor goal for clip frame ``index``.
+
+  Block-major: ``[q_ref, dq_ref]`` for every windowed frame (absolute angles),
+  then the 6D anchor orientation relative to the robot root for every frame.
+  """
   num_joints = motion.num_joints
-  default_joint_pos = np.asarray(default_joint_pos, dtype=np.float32)
   window = np.clip(
-    np.arange(index + 1, index + 1 + horizon), 0, motion.num_frames - 1
+    np.arange(index, index + horizon * stride, stride), 0, motion.num_frames - 1
   )
-  anchor_quat = motion.anchor_quat.astype(np.float64)
-  origin_quat = anchor_quat[min(max(index, 0), motion.num_frames - 1)]
-
-  origin_rot = quat_to_matrix(origin_quat)
-  delta = motion.anchor_pos[window] - motion.anchor_pos[index]
-  pos_b = delta @ origin_rot  # R(origin)^T (p_k - p_t)
-
-  ref_quat = anchor_quat[window]
+  ref_quat = motion.anchor_quat[window].astype(np.float64)
   if yaw_offset is not None:
     ref_quat = quat_mul(np.asarray(yaw_offset, dtype=np.float64), ref_quat)
   rel_quat = quat_mul(quat_inv(np.asarray(root_quat, dtype=np.float64)), ref_quat)
-  # First two columns of the rotation matrix, as ``matrix_from_quat(...)[..., :2]``.
   ori = quat_to_matrix(rel_quat)[:, :, :2].reshape(len(window), 6)
-
-  frame_rot = quat_to_matrix(anchor_quat[window])
-  lin_b = np.einsum("kji,kj->ki", frame_rot, motion.anchor_lin_vel[window])
-  ang_b = np.einsum("kji,kj->ki", frame_rot, motion.anchor_ang_vel[window])
-
-  goal = np.concatenate(
-    [
-      motion.joint_pos[window] - default_joint_pos,
-      motion.joint_vel[window],
-      pos_b,
-      ori,
-      lin_b,
-      ang_b,
-    ],
-    axis=1,
+  content = np.concatenate(
+    [motion.joint_pos[window], motion.joint_vel[window]], axis=1
   )
-  return goal.reshape(1, horizon * goal_frame_dim(num_joints)).astype(np.float32)[0]
+  goal = np.concatenate([content.reshape(-1), ori.reshape(-1)])
+  return goal.astype(np.float32)[None, :]
 
 
 def assemble_policy_input(history: np.ndarray, goal: np.ndarray) -> np.ndarray:

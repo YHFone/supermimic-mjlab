@@ -106,11 +106,11 @@ def main() -> None:
     state = trainer.extractor.state()
     context = trainer.extractor.context()
     bias = context_encoder_bias(context, trainer.spec.num_joints)
-    obs = trainer.proprio(state, trainer.last_action, bias, add_noise=False)
-    trainer.history = torch.cat([trainer.history[:, 1:], obs[:, None]], dim=1)
-    goal = command.goal()
+    obs = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
+    trainer.history = trainer.push_history(trainer.history, obs)
+    goal = command.goal()[1]
     with torch.no_grad():
-      action = actor.act(trainer.history.reshape(n, -1), goal)
+      action = actor.act(trainer.history, goal)
     _, _, terminated, truncated, _ = env.step(action)
     next_state = trainer.extractor.state()
     reference = trainer.library.gather(command.clip_ids, command.time_steps, 1)

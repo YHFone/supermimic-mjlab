@@ -58,6 +58,37 @@ class TrackingRewardCfg:
   root_ori_std: float = 0.4
 
 
+def soft_termination_prob(
+  root_pos: torch.Tensor,
+  root_quat: torch.Tensor,
+  ref_anchor_pos: torch.Tensor,
+  ref_anchor_quat: torch.Tensor,
+  *,
+  pos_threshold: float = 0.25,
+  ori_threshold: float = 0.8,
+  softness: float = 0.05,
+) -> torch.Tensor:
+  """Analytic, parameter-free termination probability (official implementation).
+
+  ``d = σ((max(|Δz|/0.25, |Δg_z|/0.8) − 1) / softness)`` where ``Δz`` is the
+  reference anchor height minus the root height and ``Δg_z`` is the difference
+  of the body-frame gravity z component between the reference and the robot.
+  For a unit quaternion ``(w, x, y, z)`` that component is ``2(x² + y²) − 1``.
+
+  Replaces the learned BCE head: it is differentiable in the state, needs no
+  goal input, and reproduces the simulator's own height/tilt thresholds with a
+  softness band of ``softness`` (default 0.05, i.e. 5 % of the threshold).
+  """
+  height_error = (ref_anchor_pos[..., 2] - root_pos[..., 2]).abs()
+  ref_gravity_z = 2.0 * (ref_anchor_quat[..., 1:3] ** 2).sum(-1) - 1.0
+  root_gravity_z = 2.0 * (root_quat[..., 1:3] ** 2).sum(-1) - 1.0
+  tilt_error = (ref_gravity_z - root_gravity_z).abs()
+  normalized = torch.maximum(
+    height_error / pos_threshold, tilt_error / ori_threshold
+  )
+  return torch.sigmoid((normalized - 1.0) / softness)
+
+
 def _quat_error_squared(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
   """Squared geodesic angle ``||log(R1^T R2)||^2`` (paper Eq. A.2).
 

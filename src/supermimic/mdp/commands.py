@@ -17,7 +17,7 @@ from mjlab.utils.lab_api.math import (
   yaw_quat,
 )
 
-from ..algo.sampler import ReturnBasedSampler
+from ..algo.sampler import ReturnSampler, ReturnSamplerCfg
 from .features import GoalFeatures, make_state
 from .motion_library import MotionLibrary, MotionLibraryCfg
 
@@ -33,12 +33,13 @@ class MotionLibraryCommandCfg(CommandTermCfg):
   body_names: tuple[str, ...] = ()
   anchor_body_name: str = ""
   goal_frames: int = 10
+  goal_stride: int = 5
+  """Reference-frame spacing of the goal window (official stride 5)."""
   sampling_mode: Literal["start", "uniform", "return", "cycle"] = "return"
   pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
   velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
   joint_position_range: tuple[float, float] = (0.0, 0.0)
   bin_size_s: float = 1.0
-  max_return: float = 10.0
   device: str | None = None
   max_frames: int | None = None
 
@@ -84,7 +85,6 @@ class MotionLibraryCommand(CommandTerm):
     self.soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits
     self.goal_features = GoalFeatures(
       num_joints=self.num_joints,
-      default_joint_pos=self.default_joint_pos,
       anchor_index=self.anchor_index,
       horizon=cfg.goal_frames,
     )
@@ -92,12 +92,12 @@ class MotionLibraryCommand(CommandTerm):
     self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self._cycle_cursor = 0
-    self.sampler = ReturnBasedSampler(
+    self.sampler = ReturnSampler(
       self.library.clip_lengths_t,
       self.library.dt,
       self.device,
-      bin_size_s=cfg.bin_size_s,
-      max_return=cfg.max_return,
+      num_envs=self.num_envs,
+      cfg=ReturnSamplerCfg(bin_size_s=cfg.bin_size_s),
     )
 
     self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
@@ -119,20 +119,26 @@ class MotionLibraryCommand(CommandTerm):
 
   @property
   def command(self) -> torch.Tensor:
-    return self.goal()
+    return self.goal()[0]
 
-  def goal(self) -> torch.Tensor:
-    # One extra frame: the current reference frame ``t`` anchors the position
-    # term, and frames ``t + 1 .. t + K`` are the goal window.  Orientations
-    # stay relative to the robot's current root.
+  def goal(self) -> tuple[torch.Tensor, torch.Tensor]:
+    """Official goal window: ``N`` frames at ``stride`` from the current one.
+
+    Returns ``(wm_goal, actor_goal)`` — 670 / 640 dims.  The anchor is expressed
+    relative to the robot's current root, so both position and orientation
+    terms cancel the world pose.
+    """
     reference = self.library.gather(
       self.clip_ids,
       self.time_steps,
-      self.cfg.goal_frames + 1,
+      self.cfg.goal_frames,
       offset=0,
+      stride=self.cfg.goal_stride,
     )
     return self.goal_features.from_reference(
-      reference, self.robot.data.root_link_quat_w
+      reference,
+      self.robot.data.root_link_pos_w - self._env.scene.env_origins,
+      self.robot.data.root_link_quat_w,
     )
 
   def state(self) -> torch.Tensor:
@@ -382,11 +388,23 @@ class MotionLibraryCommand(CommandTerm):
     self.time_steps = torch.minimum(self.time_steps, lengths)
     self.update_relative_body_poses()
 
-  def update_returns(
-    self, clip_ids: torch.Tensor, times: torch.Tensor, returns: torch.Tensor
-  ) -> None:
-    if self.cfg.sampling_mode == "return":
-      self.sampler.update_returns(clip_ids, times, returns)
+  def global_frame_index(self, clip_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+    """Global index of ``(clip, frame)`` on the concatenated motion timeline."""
+    return self.library.offsets[clip_ids] + times
+
+  def record_step(
+    self,
+    pre_frames: torch.Tensor,
+    rewards: torch.Tensor,
+    terminated: torch.Tensor,
+    timed_out: torch.Tensor,
+  ) -> bool:
+    """Feed one env step to the return sampler; True when ``V`` was updated."""
+    if self.cfg.sampling_mode != "return":
+      return False
+    return self.sampler.record(
+      pre_frames, rewards, terminated, self.is_motion_end(), timed_out
+    )
 
   def reset_to_frame(self, env_ids: torch.Tensor, clip_id: int, frame: int) -> None:
     n = len(env_ids)

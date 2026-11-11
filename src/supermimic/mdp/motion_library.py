@@ -111,10 +111,13 @@ class MotionLibrary:
     times: torch.Tensor,
     horizon: int,
     offset: int = 0,
+    stride: int = 1,
   ) -> dict[str, torch.Tensor]:
     batch = clip_ids.shape[0]
     frames = (
-      times[:, None] + offset + torch.arange(horizon, device=clip_ids.device)[None, :]
+      times[:, None]
+      + offset
+      + torch.arange(horizon, device=clip_ids.device)[None, :] * stride
     )
     idx = self.global_index(clip_ids[:, None].expand(batch, horizon), frames)
     return {

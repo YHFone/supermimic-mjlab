@@ -1,13 +1,23 @@
-"""State and context extraction for SuperMimic.
+"""State and simulator-context extraction for SuperMimic.
 
-The world model operates on a compact state
+The world model operates on the full state
 
-``s = [root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos, joint_vel]``
+    s = [root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos, joint_vel]
 
 with root quantities in the world frame and positions relative to the
-environment origin (so environments on different terrain patches share a
-distribution).  The per-episode simulator context ``xi`` collects the
-domain-randomization parameters that the world model conditions on.
+environment origin.  The per-episode simulator context ``xi`` follows the
+official implementation (``supermimic/sim_context.py``):
+
+* column order ``[foot_friction(1), torso_com_offset(3), encoder_bias(J)]``;
+* each column normalized by its domain-randomization range:
+  ``(raw - mean) / scale`` with ``mean = (lo + hi) / 2`` and
+  ``scale = (hi - lo) / 2``; a half-width below 1e-3 means the parameter is not
+  actually randomized, so ``scale = 1`` (avoids amplifying float noise);
+* values are read at the **mjModel global entity ids** the DR events write to.
+
+The previous local layout was ``[friction, bias, com]`` with raw (unnormalized)
+values, which puts the joint biases and the CoM offset in swapped columns and
+shifts every context column by a per-parameter constant.
 """
 
 from __future__ import annotations
@@ -18,11 +28,15 @@ from typing import TYPE_CHECKING, Sequence
 
 import mujoco
 import torch
+from torch import nn
 
 from .kinematics import DifferentiableKinematics, build_kinematic_tree
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+
+_DEGENERATE_HALF_WIDTH = 1e-3
+"""DR ranges narrower than this are treated as constant (scale stays 1)."""
 
 
 def _model_name_id(model: mujoco.MjModel, obj_type: mujoco.mjtObj, name: str) -> int:
@@ -39,15 +53,20 @@ def _model_name_id(model: mujoco.MjModel, obj_type: mujoco.mjtObj, name: str) ->
   raise ValueError(f"Unknown model object {name!r}")
 
 
+def _mean_scale(lo: float, hi: float) -> tuple[float, float]:
+  half = (hi - lo) / 2.0
+  return (lo + hi) / 2.0, half if half > _DEGENERATE_HALF_WIDTH else 1.0
+
+
 @dataclass
 class SuperMimicStateSpec:
   """Static tensors shared by the state extractor and the learned models."""
 
   num_envs: int
   num_joints: int
-  default_joint_pos: torch.Tensor  # (J,)
-  soft_joint_pos_limits: torch.Tensor  # (J, 2)
-  tracked_body_indices: torch.Tensor  # (B,) indices into the tracked body list
+  default_joint_pos: torch.Tensor
+  soft_joint_pos_limits: torch.Tensor
+  tracked_body_indices: torch.Tensor
   tracked_body_names: tuple[str, ...]
   robot_body_names: tuple[str, ...]
   joint_names: tuple[str, ...]
@@ -63,7 +82,7 @@ class SuperMimicStateSpec:
 
   @property
   def context_dim(self) -> int:
-    return 1 + self.num_joints + 3
+    return 1 + 3 + self.num_joints
 
   @classmethod
   def from_env(
@@ -91,12 +110,7 @@ class SuperMimicStateSpec:
 def _ancestor_body_names(
   model: mujoco.MjModel, tracked_body_names: Sequence[str]
 ) -> tuple[tuple[str, ...], list[int]]:
-  """Tracked bodies plus every ancestor needed to reach the root.
-
-  Tracked lists such as the G1's skip intermediate links (hip pitch/yaw,
-  ankle pitch).  Their joints still affect the tracked poses, so the FK tree
-  must include them even though the reward only scores the tracked subset.
-  """
+  """Tracked bodies plus every ancestor needed to reach the root."""
   tracked_ids = [
     _model_name_id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in tracked_body_names
   ]
@@ -112,8 +126,98 @@ def _ancestor_body_names(
   return names, [position[body_id] for body_id in tracked_ids]
 
 
+class SimContext(nn.Module):
+  """Per-episode domain-randomization context ``ξ``, normalized per column."""
+
+  def __init__(
+    self,
+    *,
+    num_joints: int,
+    torso_body_id: int,
+    foot_geom_id: int,
+    friction_range: tuple[float, float],
+    com_ranges: dict[int, tuple[float, float]],
+    bias_range: tuple[float, float],
+  ) -> None:
+    super().__init__()
+    self.num_joints = num_joints
+    self.torso_body_id = int(torso_body_id)
+    self.foot_geom_id = int(foot_geom_id)
+    stats = [
+      _mean_scale(*friction_range),
+      *(_mean_scale(*com_ranges[i]) for i in range(3)),
+      *(_mean_scale(*bias_range) for _ in range(num_joints)),
+    ]
+    self.register_buffer("mean", torch.tensor([m for m, _ in stats]))
+    self.register_buffer("scale", torch.tensor([s for _, s in stats]))
+    self.dim = 1 + 3 + num_joints
+
+  def raw(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+    model = env.sim.model
+    friction = model.geom_friction[:, self.foot_geom_id, 0]
+    com = model.body_ipos[:, self.torso_body_id, :]
+    bias = env.scene["robot"].data.encoder_bias
+    return torch.cat([friction[:, None], com, bias], dim=-1)
+
+  def forward(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+    raw = self.raw(env).to(self.mean.dtype)
+    return (raw - self.mean) / self.scale
+
+  @classmethod
+  def from_env(
+    cls, env: ManagerBasedRlEnv, *, torso_body_name: str = "torso_link"
+  ) -> "SimContext":
+    events = env.cfg.events
+    for name in ("foot_friction", "base_com", "encoder_bias"):
+      if name not in events:
+        raise RuntimeError(
+          f"SimContext requires the '{name}' randomization event; enable it in "
+          "the env config so the world model can condition on it."
+        )
+    model = env.sim.mj_model
+    robot = env.scene["robot"]
+    torso_id = _model_name_id(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_name)
+
+    friction_ranges = events["foot_friction"].params["ranges"]
+    if isinstance(friction_ranges, dict):
+      friction_range = tuple(friction_ranges[0])
+    else:
+      friction_range = tuple(friction_ranges)
+
+    com_params = events["base_com"].params
+    com_ranges = {i: tuple(com_params["ranges"][i]) for i in range(3)}
+    bias_range = tuple(events["encoder_bias"].params["bias_range"])
+
+    pattern = events["foot_friction"].params["asset_cfg"].geom_names
+    regex = re.compile(pattern) if isinstance(pattern, str) else None
+    foot_geom = None
+    for i in range(model.ngeom):
+      short = model.geom(i).name.rsplit("/", 1)[-1]
+      if (regex and regex.match(short)) or (
+        not regex and short in set(pattern or ())
+      ):
+        foot_geom = i
+        break
+    if foot_geom is None:
+      raise RuntimeError(f"SimContext: no foot geom matches {pattern!r}")
+
+    return cls(
+      num_joints=len(robot.joint_names),
+      torso_body_id=torso_id,
+      foot_geom_id=foot_geom,
+      friction_range=friction_range,
+      com_ranges=com_ranges,
+      bias_range=bias_range,
+    ).to(env.device)
+
+
+def context_encoder_bias(context: torch.Tensor, num_joints: int) -> torch.Tensor:
+  """Encoder calibration offsets inside ``ξ = [friction, com(3), bias(J)]``."""
+  return context[..., 4 : 4 + num_joints]
+
+
 class StateExtractor:
-  """Reads the world-model state and simulator context from an mjlab env."""
+  """Reads the full world-model state and the simulator context from an mjlab env."""
 
   def __init__(
     self,
@@ -121,33 +225,11 @@ class StateExtractor:
     spec: SuperMimicStateSpec,
     *,
     torso_body_name: str = "torso_link",
-    left_foot_geom_pattern: str = r"^left_foot[1-7]_collision$",
-    right_foot_geom_pattern: str = r"^right_foot[1-7]_collision$",
   ) -> None:
     self.env = env
     self.spec = spec
     self.robot = env.scene["robot"]
-    model = env.sim.mj_model
-    self.torso_body_id = _model_name_id(
-      model, mujoco.mjtObj.mjOBJ_BODY, torso_body_name
-    )
-    left_ids = [
-      i
-      for i in range(model.ngeom)
-      if re.search(left_foot_geom_pattern, _short_name(model.geom(i).name))
-    ]
-    right_ids = [
-      i
-      for i in range(model.ngeom)
-      if re.search(right_foot_geom_pattern, _short_name(model.geom(i).name))
-    ]
-    self.left_foot_geom_ids = torch.tensor(
-      left_ids, dtype=torch.long, device=env.device
-    )
-    self.right_foot_geom_ids = torch.tensor(
-      right_ids, dtype=torch.long, device=env.device
-    )
-    self.default_body_ipos = env.sim.get_default_field("body_ipos")
+    self.sim_context = SimContext.from_env(env, torso_body_name=torso_body_name)
 
   @property
   def origins(self) -> torch.Tensor:
@@ -167,32 +249,9 @@ class StateExtractor:
       dim=-1,
     )
 
-  def encoder_bias(self) -> torch.Tensor:
-    return self.robot.data.encoder_bias
-
   def context(self) -> torch.Tensor:
-    model = self.env.sim.model
-    left = model.geom_friction[:, self.left_foot_geom_ids, 0].mean(dim=-1)
-    right = model.geom_friction[:, self.right_foot_geom_ids, 0].mean(dim=-1)
-    friction = 0.5 * (left + right)
-    com_offset = (
-      model.body_ipos[:, self.torso_body_id]
-      - self.default_body_ipos[self.torso_body_id][None, :]
-    )
-    return torch.cat([friction[:, None], self.encoder_bias(), com_offset], dim=-1)
-
-
-def context_encoder_bias(context: torch.Tensor, num_joints: int) -> torch.Tensor:
-  """Encoder calibration offsets inside the world-model context.
-
-  ``StateExtractor.context`` returns ``[friction, bias(J), com_offset(3)]``;
-  the bias therefore starts at index 1, not 2.
-  """
-  return context[..., 1 : 1 + num_joints]
-
-
-def _short_name(name: str) -> str:
-  return name.rsplit("/", 1)[-1]
+    """Normalized simulator context ``ξ``, in the official column order."""
+    return self.sim_context(self.env)
 
 
 def build_kinematics(

@@ -2,21 +2,20 @@
 
 The deployment controller (``g1_deploy``) runs on an :mod:`onnxruntime` C++ runtime
 and only assembles *raw* observations, so everything else travels inside the
-graph:
+graph::
 
-``[obs | goal] -> action``
+    [obs | goal] -> action
 
-* ``obs`` is the flattened proprioceptive history, ``history * (3 J + 6)``
-  numbers in the order ``q - q0 | dq | omega_b | g_b | a_{t-1}``.
-* ``goal`` is the flattened reference window, ``goal_frames * (2 J + 15)``
-  numbers in the order ``q_ref - q0 | dq_ref | anchor_pos_ref |
-  anchor_ori_root | anchor_lin_vel_ref | anchor_ang_vel_ref``.
-* The observation and goal :class:`RunningNorm` statistics of the actor are
-  baked into the graph, and the encoder's ``tanh`` is applied as in
-  :meth:`ActorCritic.act`.
+* ``obs`` is the flattened sensor history, ``history * (3 J + 6)`` numbers in
+  the official order ``g_b | omega_b | q - q0 | dq | a_{t-1}``;
+* ``goal`` is the official 640-dim actor goal: ``K * 2 J`` numbers of absolute
+  ``[q_ref, dq_ref]`` followed by ``K * 6`` numbers of 6D anchor orientation
+  relative to the robot root (block-major, stride 5);
+* the actor's empirical normalizers are baked into the graph and the encoder's
+  ``tanh`` is applied as in :meth:`ActorCritic.act`.
 
-The sizes are inferred from the checkpoint, so an exported model always matches
-the actor that produced it.
+Only ``actor_obs_mode="proprio"`` actors can be exported: the ``rep_state``
+actor consumes privileged simulator state and is not deployable.
 """
 
 from __future__ import annotations
@@ -30,30 +29,15 @@ from torch import nn
 
 from .networks import ActorCritic, ActorCriticCfg
 
-# Per-frame observation terms, in the order the actor consumes them.
-OBS_TERMS: tuple[str, ...] = (
-  "joint_pos_rel",
-  "joint_vel",
-  "base_ang_vel_b",
-  "projected_gravity_b",
-  "last_action",
-)
-
-# Per-frame goal terms, in the order the goal encoder consumes them.
-GOAL_TERMS: tuple[str, ...] = (
-  "joint_pos_ref_rel",
-  "joint_vel_ref",
-  "anchor_pos_ref",
-  "anchor_ori_root",
-  "anchor_lin_vel_ref",
-  "anchor_ang_vel_ref",
-)
-
-ANCHOR_POS_DIM = 3
-ANCHOR_ORI_DIM = 6
-ANCHOR_VEL_DIM = 6
-#: ``3 + 6`` base-pose terms that are not per-joint in the observation.
+#: GenCoord representation width (1 + 3 + 3 + 3 + 2 J for J = 29).
+REP_STATE_DIM = 68
+#: World-model goal minus actor goal: the anchor position block.
+WM_EXTRA_GOAL_DIM = 30
+#: Base-pose terms per proprio frame that are not per-joint.
 BASE_OBS_DIM = 6
+#: Goal window constants (official ``GOAL_FRAME_STRIDE`` / ``NUM_GOAL_FRAMES``).
+GOAL_FRAMES = 10
+GOAL_FRAME_STRIDE = 5
 
 
 @dataclass(frozen=True)
@@ -65,12 +49,10 @@ class ActorSpec:
   action_dim: int
   history: int
   obs_frame_dim: int
-  goal_frames: int
-  goal_frame_dim: int
   latent_dim: int
-  state_dim: int
+  rep_state_dim: int
   context_dim: int
-  critic_goal_dim: int
+  wm_goal_dim: int
   encoder_hidden: tuple[int, ...]
   decoder_hidden: tuple[int, ...]
   critic_hidden: tuple[int, ...]
@@ -85,14 +67,14 @@ class ActorSpec:
 
   def actor_cfg(self) -> ActorCriticCfg:
     return ActorCriticCfg(
-      obs_dim=self.obs_dim,
+      obs_dim=self.obs_frame_dim,
+      history_len=self.history,
       goal_dim=self.goal_dim,
-      state_dim=self.state_dim,
+      wm_goal_dim=self.wm_goal_dim,
+      rep_state_dim=self.rep_state_dim,
       context_dim=self.context_dim,
       action_dim=self.action_dim,
-      critic_goal_dim=self.critic_goal_dim,
       latent_dim=self.latent_dim,
-      history_len=self.history,
       encoder_hidden=self.encoder_hidden,
       decoder_hidden=self.decoder_hidden,
       critic_hidden=self.critic_hidden,
@@ -101,7 +83,7 @@ class ActorSpec:
   def describe(self) -> str:
     return (
       f"obs {self.obs_dim} = {self.history} x {self.obs_frame_dim}, "
-      f"goal {self.goal_dim} = {self.goal_frames} x {self.goal_frame_dim}, "
+      f"goal {self.goal_dim} (actor) / {self.wm_goal_dim} (critic), "
       f"action {self.action_dim}, input {self.input_dim}"
     )
 
@@ -118,7 +100,6 @@ def _mlp_layer_indices(state: dict[str, torch.Tensor], prefix: str) -> list[int]
 
 
 def _mlp_dims(state: dict[str, torch.Tensor], prefix: str) -> tuple[int, ...]:
-  """Hidden widths of a ``_mlp`` sequential, read from its ``Linear`` weights."""
   layers = _mlp_layer_indices(state, prefix)
   return tuple(int(state[f"{prefix}{i}.weight"].shape[0]) for i in layers[:-1])
 
@@ -130,48 +111,41 @@ def _mlp_output_dim(state: dict[str, torch.Tensor], prefix: str) -> int:
 
 def infer_actor_spec(state: dict[str, torch.Tensor]) -> ActorSpec:
   """Recover :class:`ActorSpec` from an ``actor_critic`` state dict."""
-  obs_frame_dim = int(state["obs_norm.mean"].numel())
-  encoder_in = int(state["encoder.0.weight"].shape[1])
+  obs_frame_dim = int(state["obs_norm._mean"].numel())
   latent_dim = _mlp_output_dim(state, "encoder.")
-  obs_dim = int(state["decoder.0.weight"].shape[1]) - latent_dim
+  goal_dim = int(state["encoder.0.weight"].shape[1])
+  decoder_in = int(state["decoder.0.weight"].shape[1])
+  obs_dim = decoder_in - latent_dim
   action_dim = _mlp_output_dim(state, "decoder.")
-
   if obs_dim <= 0 or obs_dim % obs_frame_dim != 0:
     raise ValueError(
       f"obs_dim {obs_dim} is not a multiple of the per-frame size {obs_frame_dim}"
     )
   history = obs_dim // obs_frame_dim
-  num_joints = (obs_frame_dim - BASE_OBS_DIM) // 3
-  goal_frame_dim = 2 * num_joints + ANCHOR_POS_DIM + ANCHOR_ORI_DIM + ANCHOR_VEL_DIM
-  if encoder_in % goal_frame_dim != 0:
+  if obs_frame_dim == REP_STATE_DIM:
     raise ValueError(
-      f"goal_dim {encoder_in} is not a multiple of the per-frame size "
-      f"{goal_frame_dim} (joints {num_joints})"
+      "this actor was trained with actor_obs_mode='rep_state' and consumes "
+      "privileged simulator state; retrain with actor_obs_mode='proprio' to "
+      "export a deployable policy."
     )
-  goal_frames = encoder_in // goal_frame_dim
-
-  state_dim = 13 + 2 * num_joints
-  context_dim = 1 + num_joints + 3
-  critic_dim = int(state["critic_norm.mean"].numel())
-  critic_goal_dim = critic_dim - state_dim - context_dim
-  if critic_goal_dim != encoder_in:
+  critic_in = int(state["critic.0.weight"].shape[1])
+  wm_goal_dim = goal_dim + WM_EXTRA_GOAL_DIM
+  context_dim = critic_in - REP_STATE_DIM - wm_goal_dim
+  if context_dim <= 0:
     raise ValueError(
-      f"critic normalizer has {critic_dim} dims, expected "
-      f"{state_dim + context_dim + encoder_in}"
+      f"critic input {critic_in} does not fit rep {REP_STATE_DIM} + "
+      f"wm_goal {wm_goal_dim}"
     )
-
   return ActorSpec(
     obs_dim=obs_dim,
-    goal_dim=encoder_in,
+    goal_dim=goal_dim,
     action_dim=action_dim,
     history=history,
     obs_frame_dim=obs_frame_dim,
-    goal_frames=goal_frames,
-    goal_frame_dim=goal_frame_dim,
     latent_dim=latent_dim,
-    state_dim=state_dim,
+    rep_state_dim=REP_STATE_DIM,
     context_dim=context_dim,
-    critic_goal_dim=critic_goal_dim,
+    wm_goal_dim=wm_goal_dim,
     encoder_hidden=_mlp_dims(state, "encoder."),
     decoder_hidden=_mlp_dims(state, "decoder."),
     critic_hidden=_mlp_dims(state, "critic."),
@@ -182,9 +156,12 @@ def load_actor(
   checkpoint: str | Path, *, device: str | torch.device = "cpu"
 ) -> tuple[ActorCritic, ActorSpec, dict[str, Any]]:
   """Rebuild the trained actor from a training checkpoint."""
+  from .schema import check_version
+
   payload = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
   if "actor_critic" not in payload:
     raise KeyError(f"{checkpoint} is not a SuperMimic checkpoint (no 'actor_critic')")
+  check_version(payload.get("schema_version"), what="checkpoint")
   state = payload["actor_critic"]
   spec = infer_actor_spec(state)
   actor = ActorCritic(spec.actor_cfg())
@@ -205,12 +182,17 @@ class ActorPolicy(nn.Module):
     super().__init__()
     self.actor = actor
     self.obs_dim = obs_dim
+    self.goal_dim = goal_dim
+    self.history = actor.cfg.history_len
+    self.frame_dim = obs_dim // self.history
     self.input_dim = obs_dim + goal_dim
 
   def forward(self, policy_input: torch.Tensor) -> torch.Tensor:
-    return self.actor.act(
-      policy_input[:, : self.obs_dim], policy_input[:, self.obs_dim :]
+    obs = policy_input[:, : self.obs_dim].reshape(
+      policy_input.shape[0], self.history, self.frame_dim
     )
+    goal = policy_input[:, self.obs_dim :]
+    return self.actor.act(obs, goal)
 
 
 def export_actor_onnx(
