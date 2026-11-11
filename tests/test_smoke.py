@@ -79,8 +79,6 @@ def test_training_smoke(tmp_path):
     critic_hidden_dims=(16,),
     critic_epochs=1,
     critic_minibatches=1,
-    norm_batch_size=64,
-    norm_interval=1,
     num_iterations=2,
     log_interval=1,
     save_interval=0,

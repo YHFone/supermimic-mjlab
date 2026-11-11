@@ -108,7 +108,6 @@ def test_soft_termination_thresholds():
 def test_critic_value_is_clamped():
   cfg = ActorCriticCfg(
     obs_dim=68,
-    history_len=1,
     goal_dim=640,
     wm_goal_dim=670,
     action_dim=J,
@@ -129,7 +128,7 @@ def test_world_model_shapes_and_bryson_loss():
   rep = _rep()
   wm = WorldModel(
     rep,
-    WorldModelCfg(context_dim=33, hidden_dims=(16,), loss_mode="bryson"),
+    WorldModelCfg(context_dim=33, hidden_dims=(16,)),
     action_scale=torch.ones(J),
     action_offset=torch.zeros(J),
   )
@@ -158,13 +157,6 @@ def test_empirical_norm_eval_is_noop():
   norm.update(torch.randn(1024, 4) * 100.0)
   assert torch.allclose(norm.mean, before[0]) and torch.allclose(norm.std, before[1])
   assert torch.allclose(norm.inverse(norm(x)), x, atol=1e-5)
-
-
-def test_history_beyond_one_requires_proprio():
-  with pytest.raises(ValueError):
-    SuperMimicCfg(actor_obs_mode="rep_state", obs_history=2)
-  cfg = SuperMimicCfg(actor_obs_mode="proprio", obs_history=10)
-  assert cfg.obs_history == 10
 
 
 def test_schema_version_guard():

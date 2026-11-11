@@ -4,12 +4,7 @@ from supermimic.mdp.commands import (
   MotionLibraryCommand,
   MotionLibraryCommandCfg,
 )
-from supermimic.mdp.features import (
-  GoalFeatures,
-  ProprioFeatures,
-  ProprioNoiseCfg,
-  make_state,
-)
+from supermimic.mdp.features import GoalFeatures, make_state
 from supermimic.mdp.motion_library import (
   MotionLibrary,
   MotionLibraryCfg,
@@ -22,8 +17,6 @@ __all__ = [
   "MotionLibraryCfg",
   "MotionLibraryCommand",
   "MotionLibraryCommandCfg",
-  "ProprioFeatures",
-  "ProprioNoiseCfg",
   "make_state",
   "motion_end",
 ]

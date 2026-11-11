@@ -47,9 +47,10 @@ Implemented:
 - deterministic evaluation and a Viser/video play script;
 - unit and smoke tests.
 
-Not implemented: the velocity-command interface, learned reward/termination
-heads, multi-GPU training, real-robot deployment, and the full 129,514-clip
-library as one managed dataset.
+Not implemented: the velocity-command interface, MaxCoord representation, the
+model-free PPO baseline, multi-GPU training, real-robot deployment (the
+ONNX/deploy stack was removed together with the proprio observation path), and
+the full 129,514-clip library as one managed dataset.
 
 Installation
 ------------
@@ -116,10 +117,10 @@ The learned interfaces are the official GenCoord contract (schema v2):
   ``[z, g_b, v_b, w_b, qj, vj]`` plus the auxiliary 7-dimensional root pose,
   and predicts 35 acceleration-level deltas ``[dv_b, dw_b, dvj]`` which are
   integrated semi-implicitly with ``substep_coeff=(d+1)/(2d)``;
-* **actor observation** — ``actor_obs_mode="rep_state"`` (default) feeds the
-  68-dimensional state with one frame of history; ``"proprio"`` feeds the
-  93-dimensional sensor vector ``[g_b, omega_b, q-q0, dq, a_{t-1}]`` and is the
-  only mode that can be exported for the real robot;
+* **actor observation** — the actor consumes the 68-dimensional GenCoord state
+  directly (one frame, no sensor noise).  The paper's 93-dimensional noisy
+  proprio observation and the ONNX/deployment stack have been removed; this
+  package now has exactly one behaviour, the official one;
 * **goal** — 10 reference frames at **stride 5**, 67 numbers per frame
   (absolute ``qj``, ``vj``, root-relative anchor position, 6D anchor
   orientation); the actor sees the 640-dimensional version (no anchor
@@ -173,8 +174,8 @@ The fixes are:
   instead of a Python loop per body;
 - **one FK per step**: the reward and termination share the same body poses
   and velocities;
-- **binary, detached termination**: the paper's ``d_t`` is a discrete event,
-  so the survival product ``c_t`` should not back-propagate through it;
+- **parameter-free analytic termination**: a soft sigmoid around the simulator
+  thresholds (official), so the survival weight is differentiable;
 - **full 4,096 rollout batch** after the FK memory reduction;
 - **TF32 matmuls**, matching the precision the paper uses for world-model
   rollouts;

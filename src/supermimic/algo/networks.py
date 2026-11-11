@@ -44,7 +44,6 @@ def _mlp(
 @dataclass
 class WorldModelCfg:
   context_dim: int = 33
-  loss_mode: str = "paper"
   hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   activation: str = "gelu"
   # Bryson "nominal error" per channel group; the loss weights are 1/nominal².
@@ -80,7 +79,6 @@ class WorldModel(nn.Module):
       representation.prediction_dim,
       cfg.activation,
     )
-    self.loss_mode = cfg.loss_mode
     self.loss_nominal = {
       "root_pos": cfg.nominal_error_root_pos,
       "root_ori": cfg.nominal_error_root_ori,
@@ -133,20 +131,16 @@ class WorldModel(nn.Module):
       target = gt_blocks[name]
       mse = ((pred - target) ** 2).mean()
       n = pred.shape[-1]
-      if self.loss_mode == "bryson":
-        weight = 1.0 / self.loss_nominal[name] ** 2
-        total = total + weight * n * mse
-      else:
-        total = total + n * mse
+      weight = 1.0 / self.loss_nominal[name] ** 2
+      total = total + weight * n * mse
       width = width + n
     return total / width
 
 
 @dataclass
 class ActorCriticCfg:
-  obs_dim: int = 93
-  """Per-frame actor sensor width (93 for proprio, 68 for rep_state)."""
-  history_len: int = 1
+  obs_dim: int = 68
+  """Actor observation: the 68-dim GenCoord state."""
   goal_dim: int = 640
   """Actor goal: joint targets + anchor orientation (official ``actor_goal``)."""
   wm_goal_dim: int = 670
@@ -173,7 +167,7 @@ class ActorCritic(nn.Module):
     self.goal_norm = EmpiricalNorm(cfg.goal_dim)
     self.encoder = _mlp(cfg.goal_dim, cfg.encoder_hidden, cfg.latent_dim, cfg.activation)
     self.decoder = _mlp(
-      cfg.latent_dim + cfg.history_len * cfg.obs_dim,
+      cfg.latent_dim + cfg.obs_dim,
       cfg.decoder_hidden,
       cfg.action_dim,
       cfg.activation,
@@ -186,12 +180,10 @@ class ActorCritic(nn.Module):
     )
     self.v_max = cfg.max_step_reward / max(1e-6, 1.0 - cfg.gamma)
 
-  def act(self, history: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
-    """``history`` is ``(B, H, obs_dim)`` frame-major, newest last."""
-    batch = history.shape[0]
-    obs = self.obs_norm(history).reshape(batch, -1)
+  def act(self, obs: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+    """``obs`` is the 68-dim GenCoord state ``(B, 68)``."""
     z = torch.tanh(self.encoder(self.goal_norm(goal)))
-    return self.decoder(torch.cat([z, obs], dim=-1))
+    return self.decoder(torch.cat([z, self.obs_norm(obs)], dim=-1))
 
   def value(
     self, rep_state: torch.Tensor, goal: torch.Tensor, context: torch.Tensor
@@ -200,6 +192,6 @@ class ActorCritic(nn.Module):
     return self.critic(x).squeeze(-1).clamp(max=self.v_max)
 
   @torch.no_grad()
-  def update_normalizers(self, history: torch.Tensor, goal: torch.Tensor) -> None:
-    self.obs_norm.update(history[:, -1])
+  def update_normalizers(self, obs: torch.Tensor, goal: torch.Tensor) -> None:
+    self.obs_norm.update(obs)
     self.goal_norm.update(goal)

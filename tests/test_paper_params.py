@@ -14,7 +14,7 @@ from supermimic.algo.representation import GenCoordCfg, GenCoordRepresentation
 from supermimic.algo.reward import TrackingRewardCfg
 from supermimic.config.g1.env_cfgs import unitree_g1_supermimic_env_cfg
 from supermimic.config.g1.rl_cfg import unitree_g1_supermimic_cfg
-from supermimic.mdp.features import GoalFeatures, ProprioFeatures
+from supermimic.mdp.features import GoalFeatures
 
 
 def test_schedule_and_collection():
@@ -22,7 +22,6 @@ def test_schedule_and_collection():
   assert cfg.buffer_steps == 1000
   assert cfg.num_steps_per_env == 2.5 and cfg.utd == 0.4
   assert cfg.action_noise == 0.1
-  assert cfg.obs_history == 1
   assert cfg.goal_frames == 10 and cfg.goal_stride == 5
   assert cfg.num_iterations == 1_000_000
   assert cfg.lr_decay_iters == 0
@@ -63,7 +62,6 @@ def test_representation_and_goal_dims():
   assert rep.aux_state_dim == 7
   goal = GoalFeatures(num_joints=29, anchor_index=0)
   assert goal.wm_dim == 670 and goal.actor_dim == 640
-  assert ProprioFeatures(29, torch.zeros(29)).dim == 93
 
 
 def test_env_thresholds_and_reward():

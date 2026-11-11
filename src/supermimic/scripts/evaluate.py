@@ -14,7 +14,6 @@ from mjlab.envs.mdp.dr import geom_friction
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from supermimic.algo.config import SuperMimicCfg
-from supermimic.algo.state import context_encoder_bias
 from supermimic.algo.trainer import SuperMimicTrainer
 from supermimic.config.g1.env_cfgs import (
   unitree_g1_supermimic_env_cfg,
@@ -105,12 +104,11 @@ def main() -> None:
   for _ in range(args.max_steps):
     state = trainer.extractor.state()
     context = trainer.extractor.context()
-    bias = context_encoder_bias(context, trainer.spec.num_joints)
-    obs = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
-    trainer.history = trainer.push_history(trainer.history, obs)
+    obs = trainer.observation(state)
+    
     goal = command.goal()[1]
     with torch.no_grad():
-      action = actor.act(trainer.history, goal)
+      action = actor.act(obs, goal)
     _, _, terminated, truncated, _ = env.step(action)
     next_state = trainer.extractor.state()
     reference = trainer.library.gather(command.clip_ids, command.time_steps, 1)
@@ -147,15 +145,8 @@ def main() -> None:
       env.reset(env_ids=done_ids)
       new_state = trainer.extractor.state()[done_ids]
       new_context = trainer.extractor.context()[done_ids]
-      new_obs = trainer.actor_obs(
-        new_state,
-        torch.zeros_like(trainer.last_action[done_ids]),
-        new_context,
-        noisy=False,
-      )
-      trainer.history[done_ids] = new_obs[:, None, :].expand(
-        -1, trainer.history_len, -1
-      )
+      new_obs = trainer.observation(new_state)
+      
       trainer.last_action[done_ids] = 0.0
       ep_return[done_ids] = 0.0
       ep_steps[done_ids] = 0

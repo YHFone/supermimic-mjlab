@@ -1,4 +1,4 @@
-"""Differentiable observation and goal features (official GenCoord contract).
+"""Differentiable goal features (official GenCoord contract).
 
 Goal layout follows ``HybridRobotics/supermimic``
 (``representations.py:96-116,213-234``):
@@ -39,82 +39,6 @@ NUM_GOAL_FRAMES = 10
 GOAL_FRAME_STRIDE = 5
 GOAL_REL_POS_DIM = 3 * NUM_GOAL_FRAMES
 GOAL_REL_ORI_DIM = 6 * NUM_GOAL_FRAMES
-
-
-@dataclass(frozen=True)
-class ProprioNoiseCfg:
-  """Per-dimension uniform sensor noise (Table A.1 of the paper)."""
-
-  joint_pos: float = 0.01
-  joint_vel: float = 0.5
-  base_ang_vel: float = 0.2
-  projected_gravity: float = 0.05
-  actions: float = 0.0
-
-  def bounds(self, num_joints: int) -> torch.Tensor:
-    """Half-widths in the official proprio order."""
-    return torch.tensor(
-      [self.projected_gravity] * 3
-      + [self.base_ang_vel] * 3
-      + [self.joint_pos] * num_joints
-      + [self.joint_vel] * num_joints
-      + [self.actions] * num_joints,
-      dtype=torch.float32,
-    )
-
-
-class ProprioFeatures:
-  """Builds the 93-dimensional sensor proprio in the official term order."""
-
-  def __init__(
-    self,
-    num_joints: int,
-    default_joint_pos: torch.Tensor,
-    noise: ProprioNoiseCfg | None = None,
-  ) -> None:
-    self.num_joints = num_joints
-    self.default_joint_pos = default_joint_pos
-    self.noise = noise or ProprioNoiseCfg()
-    self.dim = 3 * num_joints + 6
-
-  def __call__(
-    self,
-    state: torch.Tensor,
-    last_action: torch.Tensor,
-    encoder_bias: torch.Tensor | None = None,
-    *,
-    add_noise: bool = True,
-  ) -> torch.Tensor:
-    """``[gravity, ang_vel, qj_rel, vj, action]`` from a 71-dim state."""
-    root_quat = state[:, 3:7]
-    joint_pos = state[:, 13 : 13 + self.num_joints]
-    joint_vel = state[:, 13 + self.num_joints :]
-    base_ang_vel_w = state[:, 10:13]
-    joint_pos_rel = joint_pos - self.default_joint_pos
-    if encoder_bias is not None:
-      joint_pos_rel = joint_pos_rel + encoder_bias
-    base_ang_vel_b = quat_apply_inverse(root_quat, base_ang_vel_w)
-    gravity_w = torch.tensor([0.0, 0.0, -1.0], device=state.device).expand_as(
-      base_ang_vel_w
-    )
-    projected_gravity_b = quat_apply_inverse(root_quat, gravity_w)
-    if add_noise:
-      joint_pos_rel = joint_pos_rel + _uniform(self.noise.joint_pos, joint_pos_rel)
-      joint_vel = joint_vel + _uniform(self.noise.joint_vel, joint_vel)
-      base_ang_vel_b = base_ang_vel_b + _uniform(
-        self.noise.base_ang_vel, base_ang_vel_b
-      )
-      projected_gravity_b = projected_gravity_b + _uniform(
-        self.noise.projected_gravity, projected_gravity_b
-      )
-    return torch.cat(
-      [projected_gravity_b, base_ang_vel_b, joint_pos_rel, joint_vel, last_action],
-      dim=-1,
-    )
-
-
-def _uniform(scale: float, like: torch.Tensor) -> torch.Tensor:
-  return (torch.rand_like(like) * 2.0 - 1.0) * scale
 
 
 class GoalFeatures:

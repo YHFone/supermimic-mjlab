@@ -40,7 +40,6 @@ def test_world_model_learns_a_linear_residual():
 def test_actor_shapes():
   cfg = ActorCriticCfg(
     obs_dim=93,
-    history_len=10,
     goal_dim=640,
     wm_goal_dim=670,
     action_dim=J,
@@ -50,8 +49,8 @@ def test_actor_shapes():
     critic_hidden=(16,),
   )
   net = ActorCritic(cfg)
-  history = torch.zeros(5, 10, 93)
-  action = net.act(history, torch.zeros(5, 640))
+  obs = torch.zeros(5, 93)
+  action = net.act(obs, torch.zeros(5, 640))
   assert action.shape == (5, J)
   value = net.value(torch.zeros(5, 68), torch.zeros(5, 670), torch.zeros(5, 33))
   assert value.shape == (5,)

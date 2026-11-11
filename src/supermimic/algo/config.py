@@ -2,12 +2,14 @@
 
 Defaults follow the official implementation (``HybridRobotics/supermimic``,
 ``runners/supermimic_runner.py`` and ``learners/*``): GenCoord representation,
-``actor_obs="rep_state"`` with a single-frame history, 10 goal frames at stride
-5, analytic soft termination, Bryson-weighted world-model loss, Muon optimizer,
-constant learning rate and a 1e6-iteration budget.
+the actor consumes the 68-dim rep state directly (single frame, no sensor
+noise), 10 goal frames at stride 5, analytic soft termination,
+Bryson-weighted world-model loss over 7 steps, Muon + Adam, per-step
+normalizer updates, constant learning rate and a 1e6-iteration budget.
 
-Where the official code and the paper differ, the official value wins and the
-paper value is noted in the field docstring.
+The paper's deployable 93-dim noisy proprio observation and the ``paper``
+(equal-weight) loss variant have been removed: this package now has exactly one
+behaviour, the official one.
 """
 
 from __future__ import annotations
@@ -36,23 +38,6 @@ class SuperMimicCfg:
   """Update-to-data ratio; overrides ``num_steps_per_env`` when set."""
   warmup_steps: int = 64
   action_noise: float = 0.1
-  sensor_noise_joint_pos: float = 0.01
-  sensor_noise_joint_vel: float = 0.5
-  sensor_noise_base_ang_vel: float = 0.2
-  sensor_noise_projected_gravity: float = 0.05
-
-  # Actor observation.
-  actor_obs_mode: Literal["rep_state", "proprio"] = "rep_state"
-  """Actor observation (official default ``rep_state``).
-
-  ``rep_state``: 68-dim GenCoord state, single frame, no sensor noise — what
-  the official runner feeds the actor by default.
-
-  ``proprio``: 93-dim deployable sensor observation with uniform noise (paper
-  Table A.1).  Required for ONNX export and for the real robot.
-  """
-  obs_history: int = 1
-  """Actor history frames (official 1).  ``>1`` requires ``proprio``."""
 
   # Goal.
   goal_frames: int = 10
@@ -71,15 +56,6 @@ class SuperMimicCfg:
   wm_hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
   wm_lr: float = 2.0e-4
   wm_grad_clip: float = 1.0
-  wm_loss_mode: str = "bryson"
-  """World-model loss weighting (official default ``bryson``).
-
-  ``bryson``: ``1/nominal^2`` per channel group (official), which puts ~95 % of
-  the loss on the root pose.
-
-  ``paper``: equal weight per state channel in normalized space (Eq. 1).  Kept
-  as an option: under BPTT it fits the joint/velocity channels much better.
-  """
   wm_nominal_error_root_pos: float = 0.01
   wm_nominal_error_root_ori: float = 0.02
   wm_nominal_error_joint_pos: float = 0.1
@@ -116,20 +92,8 @@ class SuperMimicCfg:
   critic_minibatches: int = 4
   grad_clip: float = 1.0
   grad_clip_elementwise: float = 0.1
-  use_muon: bool = True
-  """Muon on the world-model hidden ``Linear`` weights."""
-  use_muon_actor: bool = True
-  """Muon on the actor/critic hidden ``Linear`` weights (official default)."""
 
   # Normalizer updates.
-  norm_interval: int = 1
-  """World-model normalizer update period, in iterations.
-
-  ``1`` (official): update from every collected step's batch.  ``>1`` falls
-  back to the cheaper path — every ``norm_interval`` iterations from a random
-  ``norm_batch_size`` buffer sample.
-  """
-  norm_batch_size: int = 65_536
 
   # Schedule.
   num_iterations: int = 1_000_000
@@ -160,12 +124,5 @@ class SuperMimicCfg:
       raise ValueError("num_steps_per_env must be positive")
     else:
       self.utd = 1.0 / self.num_steps_per_env
-    if self.obs_history < 1:
-      raise ValueError("obs_history must be >= 1")
-    if self.obs_history > 1 and self.actor_obs_mode != "proprio":
-      raise ValueError(
-        "obs_history > 1 is only supported with actor_obs_mode='proprio' "
-        "(the official rep_state actor uses a single frame)."
-      )
     if self.termination_softness <= 0:
       raise ValueError("termination_softness must be positive")

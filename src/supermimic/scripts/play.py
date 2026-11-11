@@ -15,7 +15,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 from mjlab.envs import ManagerBasedRlEnv
 from supermimic.algo.config import SuperMimicCfg
-from supermimic.algo.state import context_encoder_bias
 from supermimic.algo.trainer import SuperMimicTrainer
 from supermimic.config.g1.env_cfgs import (
   unitree_g1_supermimic_env_cfg,
@@ -114,26 +113,17 @@ class SuperMimicPolicy:
     trainer = self.trainer
     env = trainer.env
     state = trainer.extractor.state()
-    context = trainer.extractor.context()
-    bias = context_encoder_bias(context, trainer.spec.num_joints)
-    obs_t = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
+    obs_t = trainer.observation(state)
     if self._first:
       reset = torch.ones(self.n, dtype=torch.bool, device=trainer.device)
       self._first = False
     else:
       reset = env.reset_buf
-    history = torch.where(
-      reset[:, None, None],
-      obs_t[:, None, :].expand_as(trainer.history),
-      torch.cat([trainer.history[:, 1:], obs_t[:, None]], dim=1),
-    )
-    last_action = torch.where(
+    trainer.last_action = torch.where(
       reset[:, None], torch.zeros_like(trainer.last_action), trainer.last_action
     )
-    trainer.history = history
-    trainer.last_action = last_action
     goal = trainer.command.goal()[1]
-    action = self.actor.act(history, goal)
+    action = self.actor.act(obs_t, goal)
     trainer.last_action = action
     return action
 
@@ -206,10 +196,7 @@ def _run_video(args: PlayArgs, files) -> None:
   command.reset_to_frame(env_ids, clip_index, args.start_frame)
   env.sim.forward()
   state = trainer.extractor.state()
-  context = trainer.extractor.context()
-  bias = context_encoder_bias(context, trainer.spec.num_joints)
-  obs = trainer.actor_obs(state, trainer.last_action, trainer.extractor.context(), noisy=False)
-  trainer.history[:] = obs[:, None, :].expand_as(trainer.history)
+  obs = trainer.observation(state)
   trainer.last_action.zero_()
 
   reference_env = None
@@ -227,7 +214,7 @@ def _run_video(args: PlayArgs, files) -> None:
       frame_index = args.start_frame + step
       with torch.no_grad():
         goal = command.goal()[1]
-        action = actor.act(trainer.history, goal)
+        action = actor.act(obs, goal)
       _, _, terminated, truncated, _ = env.step(action)
       next_state = trainer.extractor.state()
       reference = trainer.library.gather(command.clip_ids, command.time_steps, 1)
@@ -238,13 +225,7 @@ def _run_video(args: PlayArgs, files) -> None:
         {k: v[:, 0] for k, v in reference.items()},
       )
       trainer.last_action = action
-      next_obs = trainer.actor_obs(
-        next_state,
-        trainer.last_action,
-        trainer.extractor.context(),
-        noisy=False,
-      )
-      trainer.history = trainer.push_history(trainer.history, next_obs)
+      obs = trainer.observation(next_state)
       policy_frame = env.render()
       if policy_frame is None:
         raise RuntimeError("Environment did not return an RGB frame.")

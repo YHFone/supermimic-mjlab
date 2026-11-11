@@ -29,7 +29,7 @@ paper; the default G1 configuration reproduces Table A.5.
 | Per-environment ring buffer with episode-aware window sampling | [`algo/buffer.py`](src/supermimic/algo/buffer.py) |
 | Return-based reset sampling over 1-second bins | [`algo/sampler.py`](src/supermimic/algo/sampler.py) |
 | Tracking reward, survival weight, termination | [`algo/reward.py`](src/supermimic/algo/reward.py) |
-| State layout (proprio goal and world-model state) | [`algo/state.py`](src/supermimic/algo/state.py) |
+| State layout (world-model state and simulator context) | [`algo/state.py`](src/supermimic/algo/state.py) |
 | MDP terms: motion library, commands, features, terminations | [`mdp/`](src/supermimic/mdp) |
 | Unitree G1 environment and RL configs | [`config/g1/`](src/supermimic/config/g1) |
 | `train` / `play` / `evaluate` / `preprocess` scripts | [`scripts/`](src/supermimic/scripts) |
@@ -89,7 +89,7 @@ CUDA_VISIBLE_DEVICES=1 supermimic-train --motion-dir ~/motion_data/supermimic/g1
 `CUDA_VISIBLE_DEVICES` is read before Python starts, so the visible indices are
 remapped: `CUDA_VISIBLE_DEVICES=1` plus `--device cuda:0` means physical GPU 1,
 while `--device cuda:1` would then be out of range. `--device` is also accepted
-by `supermimic-play`, `supermimic-evaluate`, and `supermimic-export-onnx`.
+by `supermimic-play` and `supermimic-evaluate`.
 Use `--device`, not `--sm.device`: the training script overwrites
 `cfg.device` with `--device` after parsing.
 
@@ -118,43 +118,6 @@ supermimic-evaluate --checkpoint logs/supermimic/g1_supermimic/<timestamp>/check
 Every algorithm hyperparameter is a `--sm.<field>` override; the full list is in
 [`algo/config.py`](src/supermimic/algo/config.py). The G1 defaults are in
 [`config/g1/rl_cfg.py`](src/supermimic/config/g1/rl_cfg.py).
-
-## Deployment (ONNX → `g1_deploy`)
-
-The policy ships to the Unitree G1 deployment package
-(`unitree_g1_ws/src/g1_deploy`) as a single-input ONNX graph that turns
-`[obs | goal]` into the actor's action; the observation/goal normalization and the
-goal encoder's `tanh` are baked into the graph, so the C++ side only assembles
-raw numbers.
-
-```bash
-# 1) policy: obs 930 (10 x 93) + goal 730 (10 x 73) -> action 29
-supermimic-export-onnx \
-    --checkpoint logs/<run>/checkpoint_0036000.pt \
-    --output        ../g1_deploy/tf_s1_infer/policy/g1_supermimic_36k.onnx
-
-# 2) reference clip -> deploy playback format (71 floats/frame)
-supermimic-export-motion \
-    --motion ~/motion_data/supermimic/g1_lafan1_40/walk1_subject1.npz \
-    --out    ../g1_deploy/tf_s1_infer/motions/walk1_subject1.bin
-```
-
-`supermimic-export-onnx` writes a `.json` sidecar (shapes, term order, joint
-names, `default_joint_pos`, `action_scale`, `kp/kd`, joint limits) and verifies the
-graph against the PyTorch actor with onnxruntime (fails above `1e-4`; the 36k
-checkpoint of the default G1 run lands at `6.7e-06`).
-
-The goal layout is the *deployment contract*: clip frame `t` supplies the anchor
-origin, goal frame `k` is reference frame `t+1+k`, anchor positions are relative
-to the reference (`R(q_ref(t))ᵀ (p_ref(t+1+k) − p_ref(t))`), anchor orientations
-are relative to the robot root (first two matrix columns), and each goal frame
-carries the reference linear/angular velocity in its own frame. Because positions
-are reference-relative, deployment needs no base-position estimate — IMU and joint
-encoders are enough. `algo/deploy_features.py` is the NumPy reference
-implementation of that contract; `tests/test_deploy_features.py` pins it against
-`GoalFeatures`/`ProprioFeatures`, and the deploy package's
-`supermimic_adapter_check` binary dumps the C++ input for an end-to-end diff
-(measured agreement `1.8e-07`).
 
 ## Results
 

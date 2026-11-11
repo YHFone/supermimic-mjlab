@@ -23,7 +23,7 @@
 | ξ | `[friction, com(3), bias(29)]`，按 DR 范围归一化 | 同 | ✅ |
 | 奖励 | 8 项，FK 重构后打分，`dt` 缩放 | 同 | ✅ |
 | 终止 | 解析软阈值（零参数） | 同 | ✅ |
-| 默认 actor 观测 | `rep_state`（68，1 帧，无噪声） | 同（`proprio` 保留为选项，部署用） | ✅ |
+| 默认 actor 观测 | `rep_state`（68，1 帧，无噪声） | 同（`proprio` 与 ONNX/部署栈**已删除**） | ✅ |
 | 默认 WM 损失 | Bryson `(0.01, 0.02, 0.1, 3.14)` | 同（`paper` 保留为选项） | ✅ |
 | 默认 actor 优化器 | Muon + Adam | 同 | ✅ |
 | 归一化器更新 | **每个收集步** | 同（`norm_interval=1`） | ✅ |
@@ -47,7 +47,7 @@
 | | 267-296 | `_init_common`：buffer、WM learner、动作管理器 |
 | | 402-447 | `_step_and_store`：采集并写 buffer |
 | | 607-656 | `step()`：一次仿真步 + RSI 记录 |
-| | 663-762 | `run()`：主循环（`should_train`、WM/策略更新、日志、存档、ONNX） |
+| | 663-762 | `run()`：主循环（`should_train`、WM/策略更新、日志、存档；proprio 时还导出 ONNX） |
 | `learners/wm_learner.py` | 24-43 | Bryson 权重（`1/nominal²`） |
 | | 104-119 | `update()`：10 个 batch，各一步优化 |
 | | 145-191 | 自回归 7 步 + 分组 MSE |
@@ -113,8 +113,8 @@
 |---|---|---|---|---|---|
 1 | 任务/表示 | 位置参数 `task_id` | `SuperMimic-GenCoord-G1` | `SuperMimic-MaxCoord-G1` | `full_state` 布局与表示类 |
 2 | 表示 | `--runner.representation` | `gencoord` | `maxcoord` | `68/7/35` vs `182/214/84` |
-3 | actor 观测 | `--runner.actor-obs` | `rep_state` | `proprio` | 68 无噪 vs 93 带噪 |
-4 | 历史帧 | `--runner.history-length` | `1` | `>1`（仅 proprio） | actor 输入宽度 |
+3 | actor 观测 | `--runner.actor-obs` | `rep_state` | `proprio` | 68 无噪 vs 93 带噪（本地只保留前者） |
+4 | 历史帧 | `--runner.history-length` | `1` | `>1`（仅 proprio） | 本地固定 1 帧 |
 5 | learner | `--runner.policy:{actor-critic,bptt}` | **`actor-critic`** | `bptt` | γ、是否 critic 自举 |
 6 | 复位采样 | `--runner.sampling-mode` | `return` | `uniform/adaptive/start` | RSI 分布 |
 7 | 任务槽 | `--runner.slot-mix` | `{motion:1.0, velocity:0.0}` | 任意和为 1 | 多 encoder + latent BC |
@@ -194,7 +194,12 @@ RSI 三成分、buffer 不跨 episode、ONNX 只允许 proprio。
 `use_muon_actor=False`、`norm_interval>1`），便于 A/B。
 
 **官方有、本地无**：velocity 任务槽与 latent BC、MaxCoord 表示、PPO 基线 runner、
-W&B、CUDA graph 捕获、ONNX 的 15000 帧上限。
+W&B、CUDA graph 捕获、ONNX 导出（本地已随 proprio 路径一并删除）。
+
+**本地已删除的能力**（2026-11-11）：`actor_obs_mode=proprio`、93 维带噪观测、
+`wm_loss_mode=paper`、`use_muon_actor` 开关、`norm_interval` 开关，
+以及依赖 proprio 的 `export.py` / `deploy_features.py` / `export_onnx.py` /
+`export_motion.py` 与真机部署契约 —— 现在只有官方这一种行为。
 
 ---
 
