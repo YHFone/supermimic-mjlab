@@ -66,9 +66,9 @@ def unitree_g1_supermimic_env_cfg(
       elevation=-5.0,
       azimuth=120.0,
     ),
-    # Official: no wall-clock episode limit; an episode ends when the clip
-    # ends (``motion_end``) or the agent fails.
-    episode_length_s=1e9,
+    # Official training value (mjlab_research tracking_env_cfg.py:316).  Play
+    # mode overrides it to 1e9 so playback runs to the end of each clip.
+    episode_length_s=1e9 if play else 10.0,
     auto_reset=False,
   )
 

@@ -25,7 +25,7 @@ class TrainArgs:
   motion_dir: str | None = None
   motion_files: tuple[str, ...] = ()
   num_envs: int = 4096
-  episode_length_s: float = 1e9
+  episode_length_s: float = 10.0
   device: str = "cuda:0"
   seed: int = 0
   log_dir: str = "logs/supermimic"
