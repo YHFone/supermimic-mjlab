@@ -159,6 +159,8 @@ class SuperMimicTrainer:
     self.proprio_noise_bounds = self.proprio.noise.bounds(self.spec.num_joints).to(
       self.device
     )
+    self.policy_mode = cfg.policy_mode
+    self.gamma = cfg.gamma if cfg.policy_mode == "actor-critic" else cfg.bptt_gamma
     self.history_len = cfg.obs_history
     self.obs_dim = (
       self.spec.num_joints * 3 + 6
@@ -669,11 +671,16 @@ class SuperMimicTrainer:
         reward_sum = torch.zeros_like(chunk_rewards[0])
         survival = torch.ones_like(chunk_rewards[0])
         for t, r in enumerate(chunk_rewards):
-          reward_sum = reward_sum + (cfg.gamma**t) * survival * r
+          reward_sum = reward_sum + (self.gamma**t) * survival * r
           survival = survival * (1.0 - chunk_terms[t])
-        wm_goal_H, _ = chunk_goals[-1]
-        bootstrap = self.actor_critic.value(chunk_rep[-1], wm_goal_H, context)
-        objective = reward_sum + (cfg.gamma**cfg.horizon) * survival * bootstrap
+        if self.policy_mode == "actor-critic":
+          wm_goal_H, _ = chunk_goals[-1]
+          bootstrap = self.actor_critic.value(chunk_rep[-1], wm_goal_H, context)
+        else:
+          # Official ``BpttPolicyLearner._bootstrap`` returns 0: no critic, the
+          # return is simply truncated at the horizon.
+          bootstrap = torch.zeros_like(reward_sum)
+        objective = reward_sum + (self.gamma**cfg.horizon) * survival * bootstrap
         loss = -objective.mean() * weight
 
       if torch.isfinite(loss):
@@ -728,7 +735,12 @@ class SuperMimicTrainer:
       for t in range(cfg.horizon)
     ]
     context = torch.cat(all_contexts, dim=0)
-    critic_loss = self._update_critic(reps, wm_goals, rewards, term_probs, context)
+    if self.policy_mode == "actor-critic":
+      critic_loss = self._update_critic(
+        reps, wm_goals, rewards, term_probs, context
+      )
+    else:
+      critic_loss = 0.0
     return {
       "policy/objective": objective_value,
       "policy/loss": loss_value,
@@ -756,10 +768,13 @@ class SuperMimicTrainer:
       targets = [torch.zeros_like(values[0]) for _ in range(horizon)]
       running = values[-1]
       for t in range(horizon - 1, -1, -1):
-        running = rewards[t] + cfg.gamma * (1.0 - term_probs[t]) * (
+        running = rewards[t] + self.gamma * (1.0 - term_probs[t]) * (
           (1.0 - cfg.lam) * values[t + 1] + cfg.lam * running
         )
         targets[t] = running
+      # Official clamps the GAE returns at v_max as well as the value itself.
+      v_max = self.actor_critic.v_max
+      targets = [target.clamp(max=v_max) for target in targets]
 
     rep_flat = torch.cat([reps[t] for t in range(horizon)], dim=0)
     goal_flat = torch.cat([goals[t] for t in range(horizon)], dim=0)

@@ -86,6 +86,20 @@ class SuperMimicCfg:
   wm_nominal_error_joint_pos: float = 0.1
   wm_nominal_error_joint_vel: float = 3.14
 
+  # Policy learner.
+  policy_mode: Literal["actor-critic", "bptt"] = "actor-critic"
+  """Which official learner to run.
+
+  ``actor-critic`` (official default): short-horizon BPTT with a critic that
+  bootstraps beyond ``horizon``; ``gamma = 0.99``.
+
+  ``bptt``: the paper's Eq. (2) without a critic — the return is truncated at
+  ``horizon`` and ``gamma = bptt_gamma = 1.0`` (official ``BpttPolicyLearnerCfg``
+  default), so the objective is the undiscounted imagined return.
+  """
+  bptt_gamma: float = 1.0
+  """Discount used by the ``bptt`` learner (official default 1.0)."""
+
   # Policy and critic.
   horizon: int = 32
   policy_batch_size: int = 4096

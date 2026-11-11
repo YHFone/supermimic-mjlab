@@ -1,5 +1,9 @@
 # 官方仓库 vs 本仓库对比（SuperMimic）
 
+> **另见 `docs/official_vs_local_zh.md`**：按模块/分支重新整理的官方实现解剖与逐项对照，
+> 含"两种 learner（bptt vs actor-critic）"的精确差异和数据对照。本文保留为最早一轮的
+> 静态对比记录。
+
 > **状态（2026-11-11）：已按官方 GenCoord 实现对齐（schema v2）。**
 > 下表记录的是对齐**之前**的差异，保留作为证据链。对齐后的契约：
 > rep/aux/pred = 68/7/35；goal = 67×10（stride 5），actor 640 / critic 670；
