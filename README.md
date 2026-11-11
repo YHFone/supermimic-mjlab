@@ -66,6 +66,39 @@ Train (4,096 parallel environments on one GPU by default):
 supermimic-train --motion-dir ~/motion_data/supermimic/g1_1200 --num-envs 4096
 ```
 
+### Choosing a GPU
+
+Training runs on one GPU per process, selected with `--device` (default `cuda:0`).
+On a shared machine, first check which cards are free:
+
+```bash
+nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv
+```
+
+Two equivalent ways to pick a card:
+
+```bash
+# 1) Direct index: all GPUs are visible, use physical GPU 1.
+supermimic-train --motion-dir ~/motion_data/supermimic/g1_1200 --device cuda:1
+
+# 2) Isolate the process (recommended on shared hosts): only GPU 1 is visible,
+#    so it becomes cuda:0 inside the process.
+CUDA_VISIBLE_DEVICES=1 supermimic-train --motion-dir ~/motion_data/supermimic/g1_1200 --device cuda:0
+```
+
+`CUDA_VISIBLE_DEVICES` is read before Python starts, so the visible indices are
+remapped: `CUDA_VISIBLE_DEVICES=1` plus `--device cuda:0` means physical GPU 1,
+while `--device cuda:1` would then be out of range. `--device` is also accepted
+by `supermimic-play`, `supermimic-evaluate`, and `supermimic-export-onnx`.
+Use `--device`, not `--sm.device`: the training script overwrites
+`cfg.device` with `--device` after parsing.
+
+This repo trains one GPU per process (no data-parallel launcher). To run
+several jobs, start separate processes with different
+`CUDA_VISIBLE_DEVICES`/`--device` values and separate `--log-dir` /
+`--experiment-name`; MuJoCo Warp follows the same selected device, so there is
+no CPU-training fallback.
+
 Watch the policy (Viser at <http://localhost:8091>; the reference robot is overlaid and can be
 toggled under "SuperMimic reference"):
 

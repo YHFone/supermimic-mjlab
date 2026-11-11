@@ -257,6 +257,65 @@ $$
 
 ---
 
+### 6.5 真实 checkpoint 上，这座“桥”有多宽
+
+上面是玩具机器人 + 随机初始化的模型。用真实 checkpoint 再量一次
+（`scratch/wm_gain_probe.py`，`logs/2026-10-29_20-19-56/`，G1 的 71 维状态 / 29 维动作）：
+
+- 冻结后**参数梯度严格为 0**：14 个参数张量 `.grad` 全是 `None`；
+- 唯一通道是动作雅可比
+
+$$
+J_a=\frac{\partial \hat s_{t+1}}{\partial a_t}\in\mathbb{R}^{71\times 29},
+\qquad
+\nabla_{a_t}\hat J=J_a^{\top}\lambda_t,\quad \lambda_t=\delta_{t+1}
+$$
+
+把状态的每一维按 checkpoint 里的 running std 归一化（这样米、弧度、rad/s 可比），
+$J_a$ 的奇异值谱就是“一个标准差的动作能引起多少个标准差的状态变化”：
+
+| 量（归一化） | iter 3 000 | iter 36 000 |
+| --- | --- | --- |
+| $\lVert J_a\rVert_F$ | 8.12 | 11.80 |
+| $\sigma_{\max}$（最坏方向） | 3.30 | 4.15 |
+| $\sigma_{\text{median}}$（典型方向） | 1.29 | 1.81 |
+| $\sigma_{\min}$（最好方向） | 0.15 | 0.20 |
+| $\lVert J_s\rVert_F$，$J_s=\partial\hat s'/\partial\hat s$ | 10.01 | 13.82 |
+| $\sigma_{\max}(J_s)$ / $\sigma_{\min}(J_s)$ | 3.28 / 0.019 | 5.16 / 0.009 |
+
+分块看（iter 36 k，$J_a$ 的行块 RMS）：
+
+| 状态块 | root_pos | root_quat | root_lin_vel | root_ang_vel | joint_pos | joint_vel |
+| --- | --- | --- | --- | --- | --- | --- |
+| RMS | 0.04 | 0.06 | 0.35 | 1.80 | 0.22 | **2.40** |
+
+三个可以直接读出来的结论：
+
+1. **桥不是 1，也不是 0，而是一个各向异性的矩阵**。典型方向 1.8×，最坏方向 4.2×，
+   最好方向 0.2×——梯度穿过它时按方向被放大或压扁，这也解释了为什么单看“梯度范数”
+   会不稳定。
+2. **灵敏度几乎全在关节速度上**（2.40），根位置/姿态几乎不动（0.04/0.06）。物理上正确：
+   动作是关节目标角，一步之内先变的是 $\dot q$，位置要积分很多步才动
+   ——实测 $\partial q'/\partial a=0.046$ /步，时间常数约 0.45 s。
+3. **模型越训越“粗”**：3 k → 36 k，$\lVert J_a\rVert_F$ 从 8.1 涨到 11.8。随机初始化的
+   模型接近恒等（渐变很小），训练后才有真实动力学，桥也就变宽了。
+
+多步连乘（同一个样本，$\lVert\partial\hat s_t/\partial a_0\rVert$ 的 $\sigma_{\max}$ / RMS）：
+
+| $t$ | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| $\sigma_{\max}$ | 4.84 | 2.03 | 1.80 | 1.59 | 1.45 | 1.39 |
+| RMS（典型方向） | 0.30 | 0.10 | 0.09 | 0.08 | 0.07 | 0.06 |
+
+典型方向每步约 ×0.79，最坏方向第一步就掉一半、后面稳定在 1.4 左右。注意这**不是**
+§6.3 那个 0.88——那里量的是伴随 $\delta_t$（每步还注入新的奖励梯度），这里量的是纯
+传输矩阵的连乘，两者不可相乘。
+
+> 说明：状态样本是按 checkpoint 的 running mean/std **逐维独立**采的（没有维间相关性），
+> 所以是“典型尺度”的近似，不是真实 on-policy 状态分布。量级可信，个别数值会漂。
+
+---
+
 ## 7. 几个容易踩的坑
 
 1. **冻结 ≠ 断开**。`requires_grad_(False)` 只是不更新参数，图照样建、显存照样吃、梯度照样穿过。想真正省显存要 `detach` 状态（那就变成单步方法了，见 §6.2）。
@@ -273,11 +332,18 @@ $$
 ```bash
 conda activate tfbot_rl
 cd /home/zy0028/mjlab_project/supermimic-mjlab
+# 1) 玩具机器人上的路径消融（CPU，几秒）
 PYTHONPATH=src python scratch/grad_probe.py \
     --batch 64 --horizon 16 --plot docs/assets/gradient_flow_probe.png
+
+# 2) 真实 checkpoint 上的动作雅可比（CPU，约 1 分钟）
+PYTHONPATH=src python scratch/wm_gain_probe.py \
+    --ckpt logs/2026-10-29_20-19-56/checkpoint_0036000.pt \
+    --compare logs/2026-10-29_20-19-56/checkpoint_0003000.pt
 ```
 
-输出：控制台五段报告 + `scratch/grad_probe.json` + 上图。`--seed 1` 可复现第二个种子的数字。
+输出：控制台报告 + `scratch/grad_probe.json` / `scratch/wm_gain_probe.json` + 上图。
+`--seed 1` 可复现第二个种子的数字。
 
 ---
 

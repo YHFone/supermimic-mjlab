@@ -62,6 +62,10 @@ class SuperMimicTrainer:
     self.env_steps = 0
     self._rng = torch.Generator(device=self.device)
     self._rng.manual_seed(cfg.seed)
+    # Current hard-termination rate (EMA over collected steps).  The terminal
+    # ring is capacity-limited, so terminal_count / count.sum() saturates and
+    # cannot be used as the positive-sample rate.
+    self.term_rate_ema = 0.0
 
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
@@ -261,6 +265,9 @@ class SuperMimicTrainer:
       clip_ids = self.command.clip_ids.clone()
       time_steps = self.command.time_steps.clone()
       _, _, terminated, truncated, _ = self.env.step(noisy_action)
+      self.term_rate_ema = _ema_term_rate(
+        self.term_rate_ema, float(terminated.float().mean().item())
+      )
       next_state = self.extractor.state()
       reference = self.library.gather(clip_ids, time_steps, 1)
       reward, terms = self.reward(
@@ -365,6 +372,7 @@ class SuperMimicTrainer:
     k = cfg.wm_window
     losses = []
     term_losses = []
+    term_pos_rates: list[float] = []
     self.world_model.train()
     for _ in range(cfg.wm_updates_per_iter):
       env_ids, positions = self.buffer.sample_windows(
@@ -391,8 +399,7 @@ class SuperMimicTrainer:
         live = sample["live"]
         n_live = int(live.sum().item())
         if n_live >= 1:
-          total = max(1, int(self.buffer.count.sum().item()))
-          rate = self.buffer.terminal_count / total
+          rate = min(1.0, max(1e-4, self.term_rate_ema))
           n_pos = min(
             self.buffer.terminal_count,
             cfg.wm_batch_size,
@@ -423,6 +430,7 @@ class SuperMimicTrainer:
           # the paper's 1/k relative weight for the termination term.
           loss = loss + cfg.wm_term_loss_weight * term_loss / k
           term_losses.append(float(term_loss.item()))
+          term_pos_rates.append(float(rate))
       self.wm_optimizer.zero_grad(set_to_none=True)
       if torch.isfinite(loss):
         loss.backward()
@@ -455,6 +463,10 @@ class SuperMimicTrainer:
       "world_model/term_loss": float(torch.tensor(term_losses).mean().item())
       if term_losses
       else 0.0,
+      "world_model/term_pos_rate": float(torch.tensor(term_pos_rates).mean().item())
+      if term_pos_rates
+      else 0.0,
+      "world_model/term_rate_ema": float(self.term_rate_ema),
     }
 
   def _update_normalizers(self) -> None:
@@ -883,6 +895,11 @@ class SuperMimicTrainer:
       line("Mean action std", f"{mean_action_std:.4f}"),
       line("Success rate", success_rate),
       line("Done rate", f"{logs['collect/done_rate']:.4f}"),
+      line("Term rate EMA", f"{logs['world_model/term_rate_ema']:.5f}"),
+      line(
+        "Term positive rate",
+        f"{logs['world_model/term_pos_rate']:.5f}",
+      ),
       line("Bad gradients", f"{int(logs['policy/bad_grads'])}"),
       line("Learning rate", f"{self.actor_optimizer.param_groups[0]['lr']:.2e}"),
     ]
@@ -1013,6 +1030,13 @@ class SuperMimicTrainer:
   def close(self) -> None:
     if self._writer is not None:
       self._writer.close()
+
+
+def _ema_term_rate(previous: float, batch_rate: float, decay: float = 0.99) -> float:
+  """EMA of the hard-termination rate; first non-zero sample initializes it."""
+  if previous == 0.0:
+    return float(batch_rate)
+  return float(decay * previous + (1.0 - decay) * batch_rate)
 
 
 def _set_requires_grad(parameters, value: bool) -> list[bool]:
