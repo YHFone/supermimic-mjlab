@@ -74,8 +74,9 @@ def build_optimizers(
   ]
   hidden_ids = {id(p) for p in hidden}
   rest = [p for m in modules for p in m.parameters() if id(p) not in hidden_ids]
+  fused = any(p.is_cuda for p in rest)
   optimizers: list[torch.optim.Optimizer] = [
-    torch.optim.Adam(rest, lr=lr, betas=betas)
+    torch.optim.Adam(rest, lr=lr, betas=betas, fused=fused)
   ]
   if hidden and hasattr(torch.optim, "Muon"):
     optimizers.append(

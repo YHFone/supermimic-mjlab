@@ -15,7 +15,6 @@ def unitree_g1_supermimic_cfg() -> SuperMimicCfg:
   return SuperMimicCfg(
     buffer_steps=1000,
     replay_ratio=16,
-    warmup_steps=64,
     action_noise=0.1,
     goal_frames=10,
     goal_stride=5,

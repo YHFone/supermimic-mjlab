@@ -27,7 +27,7 @@ class TrainArgs:
   num_envs: int = 4096
   episode_length_s: float = 10.0
   device: str = "cuda:0"
-  seed: int = 0
+  seed: int | None = None
   log_dir: str = "logs/supermimic"
   experiment_name: str = "g1_supermimic"
   resume: str | None = None
@@ -76,7 +76,8 @@ def main() -> None:
 
   env_cfg = unitree_g1_supermimic_env_cfg(files, num_envs=args.num_envs, play=False)
   env_cfg.episode_length_s = args.episode_length_s
-  env_cfg.seed = args.seed
+  if args.seed is not None:
+    env_cfg.seed = args.seed
 
   cfg = args.sm
   cfg.device = args.device

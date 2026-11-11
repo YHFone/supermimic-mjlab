@@ -349,9 +349,6 @@ class MotionLibraryCommand(CommandTerm):
       joint_pos.shape,
       device=self.device,
     )
-    limits = self.soft_joint_pos_limits[env_ids]
-    joint_pos = torch.clip(joint_pos, limits[:, :, 0], limits[:, :, 1])
-
     self._write_reference_state_to_sim(
       env_ids,
       root_pos,

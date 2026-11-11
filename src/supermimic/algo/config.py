@@ -33,7 +33,8 @@ class SuperMimicCfg:
   (4096/10/2048/8 × 16 = 0.4), so ``num_iterations`` counts simulator steps and
   a round runs on ~40 % of them.
   """
-  warmup_steps: int = 64
+  warmup_steps: int = 0
+  """Extra collect-only steps before the loop (official starts at ``wm_window`` steps)."""
   action_noise: float = 0.1
 
   # Goal.
