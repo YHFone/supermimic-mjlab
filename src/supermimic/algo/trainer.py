@@ -37,7 +37,6 @@ from supermimic.algo.networks import (
 )
 from supermimic.algo.representation import GenCoordCfg, GenCoordRepresentation
 from supermimic.algo.reward import (
-  TRACKING_REWARD_TERMS,
   TrackingReward,
   TrackingRewardCfg,
   soft_termination_prob,
@@ -131,6 +130,11 @@ class SuperMimicTrainer:
       default_joint_pos=self.spec.default_joint_pos,
     ).to(self.device)
 
+    if cfg.compile and torch.cuda.is_available():
+      # Official compiles ``WorldModelEnv.step``; keep the eager method as
+      # ``_imagine_step_eager`` for the CUDA-graph-free path.
+      self._imagine_step_eager = self._imagine_step
+      self._imagine_step = torch.compile(self._imagine_step, mode="default")
     self.reward = TrackingReward(
       self.kinematics,
       self.spec.tracked_body_indices,
@@ -227,9 +231,7 @@ class SuperMimicTrainer:
     self._fail_len_buf: deque[float] = deque(maxlen=100)
     self._fail_rew_buf: deque[float] = deque(maxlen=100)
     self._max_episode_length = int(env.max_episode_length)
-    self.reward_term_names = list(TRACKING_REWARD_TERMS)
-    self._term_sums = torch.zeros(len(self.reward_term_names), device=self.device)
-    self._term_steps = 0
+    self._ep_extras: list[dict[str, float]] = []
     self._action_std_sum = 0.0
     self._action_std_steps = 0
     self._step_reward_sum = 0.0
@@ -258,8 +260,6 @@ class SuperMimicTrainer:
     self._completed_returns.clear()
     self._completed_lengths.clear()
     self._completed_success.clear()
-    self._term_sums.zero_()
-    self._term_steps = 0
     self._action_std_sum = 0.0
     self._action_std_steps = 0
     self._step_reward_sum = 0.0
@@ -300,12 +300,13 @@ class SuperMimicTrainer:
       clip_ids = self.command.clip_ids.clone()
       time_steps = self.command.time_steps.clone()
       pre_frames = self.command.global_frame_index(clip_ids, time_steps)
-      _, _, terminated, truncated, _ = self.env.step(noisy_action)
-      next_state = self.extractor.state()
-      reference = _squeeze(self.library.gather(clip_ids, time_steps, 1))
-      reward, terms = self.reward(
-        next_state, noisy_action, self.last_action, reference
-      )
+      # Official: the env computes the reward and the termination flags before
+      # the (auto) reset, so the values belong to the terminal state.
+      _, reward, terminated, truncated, extras = self.env.step(noisy_action)
+      if extras:
+        self._ep_extras.append(
+          {k: float(v) for k, v in extras.items() if k.startswith("Episode_Reward/")}
+        )
       done = terminated | truncated
       self.buffer.add(
         state,
@@ -316,7 +317,6 @@ class SuperMimicTrainer:
         clip_ids,
         time_steps,
         terminated=terminated,
-        next_state=next_state,
       )
       self.command.record_step(pre_frames, reward, terminated, truncated)
       self.env_steps += self.env.num_envs
@@ -339,10 +339,6 @@ class SuperMimicTrainer:
 
       self.episode_return += reward
       self.episode_length += 1
-      contributions = self.reward.term_contributions(terms)
-      for term_index, term_name in enumerate(self.reward_term_names):
-        self._term_sums[term_index] += float(contributions[term_name].mean().item())
-      self._term_steps += 1
 
       self.last_action = noisy_action
       if bool(done.any()):
@@ -351,7 +347,7 @@ class SuperMimicTrainer:
           self._completed_returns.append(float(self.episode_return[env_id].item()))
           self._completed_lengths.append(int(self.episode_length[env_id].item()))
           self._completed_success.append(not bool(terminated[env_id].item()))
-        self.env.reset(env_ids=done_ids)
+        # auto_reset=True: the env already reset these rows inside step().
         self.last_action[done_ids] = 0.0
         self.episode_return[done_ids] = 0.0
         self.episode_length[done_ids] = 0
@@ -470,6 +466,52 @@ class SuperMimicTrainer:
       reference, aux_state[..., 0:3], aux_state[..., 3:7]
     )
 
+  def _imagine_step(
+    self,
+    aux: torch.Tensor,
+    rep: torch.Tensor,
+    action: torch.Tensor,
+    prev_action: torch.Tensor,
+    context: torch.Tensor,
+    reference: dict[str, torch.Tensor],
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One imagined step: dynamics -> FK -> tracking reward -> soft termination.
+
+    Pure function of its tensors, so ``torch.compile`` can trace it (the official
+    runner compiles ``WorldModelEnv.step`` the same way).
+    """
+    cfg = self.cfg
+    next_aux, next_rep = self.world_model(aux, rep, action, context)
+    full_state = self.representation.reconstruct_full_state(next_aux, next_rep)
+    body_pos, body_quat, body_lin_vel, body_ang_vel = self.forward_kinematics(
+      full_state[:, 0:3],
+      full_state[:, 3:7],
+      full_state[:, 7:10],
+      full_state[:, 10:13],
+      full_state[:, 13 : 13 + self.spec.num_joints],
+      full_state[:, 13 + self.spec.num_joints :],
+    )
+    reward, _ = self.reward.forward_from_bodies(
+      full_state,
+      action,
+      prev_action,
+      reference,
+      body_pos,
+      body_quat,
+      body_lin_vel,
+      body_ang_vel,
+    )
+    term_prob = soft_termination_prob(
+      next_aux[..., 0:3],
+      next_aux[..., 3:7],
+      reference["body_pos"][:, self.anchor_index],
+      reference["body_quat"][:, self.anchor_index],
+      pos_threshold=cfg.termination_pos_threshold,
+      ori_threshold=cfg.termination_ori_threshold,
+      softness=cfg.termination_softness,
+    )
+    return next_aux, next_rep, reward, term_prob
+
   def _update_policy(self) -> dict[str, float]:
     cfg = self.cfg
     total = cfg.policy_batch_size
@@ -515,38 +557,12 @@ class SuperMimicTrainer:
       with torch.enable_grad():
         for _t in range(cfg.horizon):
           action = self.actor_critic.act(obs, actor_goal)
-          next_aux, next_rep = self.world_model(aux, rep, action, context)
-          full_state = self.representation.reconstruct_full_state(next_aux, next_rep)
           reference = _squeeze(self.library.gather(clip_ids, times, 1))
-          body_pos, body_quat, body_lin_vel, body_ang_vel = self.forward_kinematics(
-            full_state[:, 0:3],
-            full_state[:, 3:7],
-            full_state[:, 7:10],
-            full_state[:, 10:13],
-            full_state[:, 13 : 13 + self.spec.num_joints],
-            full_state[:, 13 + self.spec.num_joints :],
-          )
-          reward, _ = self.reward.forward_from_bodies(
-            full_state,
-            action,
-            prev_action,
-            reference,
-            body_pos,
-            body_quat,
-            body_lin_vel,
-            body_ang_vel,
+          next_aux, next_rep, reward, term_prob = self._imagine_step(
+            aux, rep, action, prev_action, context, reference
           )
           times = times + 1
           wm_goal, actor_goal = self._goal_for(clip_ids, times, next_aux)
-          term_prob = soft_termination_prob(
-            next_aux[..., 0:3],
-            next_aux[..., 3:7],
-            reference["body_pos"][:, self.anchor_index],
-            reference["body_quat"][:, self.anchor_index],
-            pos_threshold=cfg.termination_pos_threshold,
-            ori_threshold=cfg.termination_ori_threshold,
-            softness=cfg.termination_softness,
-          )
           chunk_rewards.append(reward)
           chunk_terms.append(term_prob)
           chunk_aux.append(next_aux)
@@ -818,7 +834,13 @@ class SuperMimicTrainer:
     mean_action_std = (
       self._action_std_sum / self._action_std_steps if self._action_std_steps else 0.0
     )
-    term_means = (self._term_sums / max(1, self._term_steps)).cpu().tolist()
+    term_means: dict[str, float] = {}
+    if self._ep_extras:
+      keys = {k for extra in self._ep_extras for k in extra}
+      for key in keys:
+        values = [extra[key] for extra in self._ep_extras if key in extra]
+        if values:
+          term_means[key] = statistics.mean(values)
 
     def g(key: str) -> float:
       return float(logs.get(key, 0.0))
@@ -854,8 +876,8 @@ class SuperMimicTrainer:
       line("Bad gradients", f"{int(g('policy/bad_grads'))}"),
       line("Learning rate", f"{self.actor_optimizers[0].param_groups[0]['lr']:.2e}"),
     ]
-    for name, value in zip(self.reward_term_names, term_means, strict=True):
-      lines.append(line(f"Episode reward {name}", f"{value:.5f}"))
+    for name, value in term_means.items():
+      lines.append(line(f"Episode reward {name.split('/')[-1]}", f"{value:.5f}"))
     command_metrics = {
       name: float(value.mean().item()) for name, value in self.command.metrics.items()
     }
@@ -896,20 +918,19 @@ class SuperMimicTrainer:
           sum(self._completed_success) / len(self._completed_success),
           it,
         )
-      for name, value in zip(self.reward_term_names, term_means, strict=True):
-        self._writer.add_scalar(f"episode_term/{name}", value, it)
+      for name, value in term_means.items():
+        self._writer.add_scalar(f"episode_term/{name.split('/')[-1]}", value, it)
       for name, value in command_metrics.items():
         self._writer.add_scalar(f"command/{name}", value, it)
 
     self._completed_returns.clear()
     self._completed_lengths.clear()
     self._completed_success.clear()
-    self._term_sums.zero_()
-    self._term_steps = 0
     self._action_std_sum = 0.0
     self._action_std_steps = 0
     self._step_reward_sum = 0.0
     self._step_reward_count = 0
+    self._ep_extras.clear()
 
   def _set_lr(self, iteration: int) -> None:
     cfg = self.cfg

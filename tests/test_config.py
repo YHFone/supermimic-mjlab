@@ -29,8 +29,18 @@ def test_g1_rl_cfg_matches_official_defaults():
 def test_g1_env_cfg_uses_multi_motion_command():
   cfg = unitree_g1_supermimic_env_cfg(["dummy.npz"], num_envs=4)
   assert cfg.scene.num_envs == 4
-  assert cfg.auto_reset is False
-  assert cfg.rewards == {}
+  assert list(cfg.rewards) == [
+    "motion_global_root_pos",
+    "motion_global_root_ori",
+    "motion_body_pos",
+    "motion_body_ori",
+    "motion_body_lin_vel",
+    "motion_body_ang_vel",
+    "action_rate_l2",
+    "joint_limit",
+  ]
+  assert [t.weight for t in cfg.rewards.values()] == [0.5, 0.5, 1.0, 1.0, 1.0, 1.0, -0.1, -2.0]
+  assert cfg.auto_reset is True
   command = cfg.commands["motion"]
   assert isinstance(command, MotionLibraryCommandCfg)
   assert command.goal_frames == 10

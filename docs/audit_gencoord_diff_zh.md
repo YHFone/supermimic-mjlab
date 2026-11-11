@@ -12,8 +12,8 @@
 > | D7 种子 | ✅ 配置默认 `None`；**本轮补**：`TrainArgs.seed` 也从 0 改为 None，否则入口仍会传 0 |
 > | D8 critic perm | ✅ 每次更新只采样一次排列 |
 > | D10 episode length 口径 | ✅ 主指标改为官方口径（失败/500 步 flush，deque-100），另加 `Mean true episode length` |
-> | D6 auto_reset / 奖励来源 | ⏸ 保留（数据等价，见 §2.6 说明） |
-> | D9 compile / CUDA graph | ⏸ 保留（纯性能） |
+> | D6 auto_reset / 奖励来源 | ✅ 已改：`auto_reset=True`，buffer/RSI 用 env 侧奖励，解析奖励只用于想象；尾部奖励日志改读 `extras["Episode_Reward/*"]` |
+> | D9 compile / CUDA graph | 🟡 部分：已 compile 想象步（`_imagine_step`，对应官方 `torch.compile(wm_env.step)`）；**CUDA graph 未做**（需去掉更新路径里的 `.item()` 同步并把数据拷入静态 buffer，且必须上卡验证） |
 > | D11 观测组 / state 列序 | ⏸ 保留（内部布局，rep 接口相同） |
 > | D12 checkpoint 格式 | ⏸ 保留（三文件 vs 单文件，纯格式） |
 > | **A1** `warmup_steps=64` | ✅ 已改为 0（官方首个训练轮在 buffer 满 8 帧时） |

@@ -10,6 +10,7 @@ from mjlab.envs import mdp as env_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.dr import body_com_offset, encoder_bias, geom_friction
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
@@ -69,7 +70,6 @@ def unitree_g1_supermimic_env_cfg(
     # Official values (mjlab_research tracking_env_cfg.py:316 and the play
     # override at .../g1/env_cfgs.py:89).
     episode_length_s=1e9 if play else 10.0,
-    auto_reset=False,
   )
 
   joint_pos_action = JointPositionActionCfg(
@@ -171,7 +171,46 @@ def unitree_g1_supermimic_env_cfg(
     ),
   }
 
-  cfg.rewards = {}
+  # Official tracking rewards (mjlab_research tracking_env_cfg.py:209-246) with
+  # the SuperMimic overrides: self_collisions removed, joint_limit -2.
+  cfg.rewards = {
+    "motion_global_root_pos": RewardTermCfg(
+      func=tracking_mdp.motion_global_anchor_position_error_exp,
+      weight=0.5,
+      params={"command_name": "motion", "std": 0.3},
+    ),
+    "motion_global_root_ori": RewardTermCfg(
+      func=tracking_mdp.motion_global_anchor_orientation_error_exp,
+      weight=0.5,
+      params={"command_name": "motion", "std": 0.4},
+    ),
+    "motion_body_pos": RewardTermCfg(
+      func=tracking_mdp.motion_relative_body_position_error_exp,
+      weight=1.0,
+      params={"command_name": "motion", "std": 0.3},
+    ),
+    "motion_body_ori": RewardTermCfg(
+      func=tracking_mdp.motion_relative_body_orientation_error_exp,
+      weight=1.0,
+      params={"command_name": "motion", "std": 0.4},
+    ),
+    "motion_body_lin_vel": RewardTermCfg(
+      func=tracking_mdp.motion_global_body_linear_velocity_error_exp,
+      weight=1.0,
+      params={"command_name": "motion", "std": 1.0},
+    ),
+    "motion_body_ang_vel": RewardTermCfg(
+      func=tracking_mdp.motion_global_body_angular_velocity_error_exp,
+      weight=1.0,
+      params={"command_name": "motion", "std": 3.14},
+    ),
+    "action_rate_l2": RewardTermCfg(func=env_mdp.action_rate_l2, weight=-1e-1),
+    "joint_limit": RewardTermCfg(
+      func=env_mdp.joint_pos_limits,
+      weight=-2.0,
+      params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*",))},
+    ),
+  }
 
   cfg.terminations = {
     "time_out": TerminationTermCfg(func=env_mdp.time_out, time_out=True),
