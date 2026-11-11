@@ -1,5 +1,9 @@
 # 官方 SuperMimic 实现解剖与本地对照
 
+> **当前状态（commit `70dde69`，2026-11-11）**：下表中"本地"一列的**默认值已全部与官方一致** ——
+> `rep_state` + 1 帧、Bryson 损失、Muon(actor/critic/WM) + Adam、归一化器每收集步更新、
+> actor 输入 708。若你看到的是旧版表格，请以本文件当前内容为准（`git log --oneline -1` 应为 `70dde69`）。
+
 > 对象
 > - **官方**：`/home/zy0028/mjlab_project/supermimic_ws/supermimic`（`HybridRobotics/supermimic`，10,263 行）
 > - **本地**：`/home/zy0028/mjlab_project/supermimic-mjlab`（本仓库，对齐后 schema v2）
