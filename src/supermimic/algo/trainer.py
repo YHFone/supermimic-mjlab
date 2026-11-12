@@ -1267,6 +1267,23 @@ def _episode_reward_extras(extras: dict | None) -> dict[str, float]:
   }
 
 
+def window_timings(
+  window_total: float, wm_seconds: float, policy_seconds: float
+) -> dict[str, float]:
+  """Official timing accounting: collect is the remainder, so the three parts
+  sum to ``window_total`` (supermimic_runner.py:736-743)."""
+  collect = window_total - wm_seconds - policy_seconds
+  if collect < 0.0:  # clock jitter: keep the invariant instead of clamping alone
+    wm_seconds *= window_total / max(window_total + -collect, 1e-9)
+    policy_seconds *= window_total / max(window_total + -collect, 1e-9)
+    collect = 0.0
+  return {
+    "time/collect": collect,
+    "time/world_model": wm_seconds,
+    "time/policy": policy_seconds,
+  }
+
+
 class Ratio:
   """Fractional scheduler: returns how many repeats are due at ``step``."""
 
