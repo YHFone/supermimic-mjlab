@@ -11,9 +11,11 @@ import torch
 
 from supermimic.algo.empirical_norm import EmpiricalNorm
 from supermimic.algo.networks import ActorCritic, ActorCriticCfg, WorldModel, WorldModelCfg
+from supermimic.mdp.features import make_state
 from supermimic.algo.representation import (
   GenCoordCfg,
   GenCoordRepresentation,
+  decompose_full_state,
   quat_integrate,
 )
 from supermimic.algo.reward import soft_termination_prob
@@ -329,3 +331,31 @@ def test_reward_ceiling_is_derived_from_env_weights():
     ),
   )
   assert max_step_reward_ceiling(env) == pytest.approx(0.02 * 1.5)
+
+
+def test_full_state_block_order_matches_decompose():
+  """The producer (make_state, and therefore StateExtractor.state) and the
+  consumer (decompose_full_state / represent) must agree on the column order.
+
+  Regression: state() once emitted [p, q, v, w, qj, vj] while decompose read the
+  official [p, q, qj, v, w, vj], which scrambled half of the actor observation
+  and inflated the joint-limit reward ~300x; the unit tests missed it because
+  they all built states with make_state (already official order).
+  """
+  n = 4
+  j = 3
+  block = lambda value: torch.full((n, 1), float(value))
+  root_pos = torch.cat([block(1), block(2), block(3)], dim=-1)
+  root_quat = torch.cat([block(4), block(5), block(6), block(7)], dim=-1)
+  joint_pos = torch.cat([block(10), block(11), block(12)], dim=-1)
+  lin_vel = torch.cat([block(20), block(21), block(22)], dim=-1)
+  ang_vel = torch.cat([block(30), block(31), block(32)], dim=-1)
+  joint_vel = torch.cat([block(40), block(41), block(42)], dim=-1)
+  state = make_state(root_pos, root_quat, lin_vel, ang_vel, joint_pos, joint_vel)
+  p, q, qj, v, w, vj = decompose_full_state(state, j)
+  assert torch.equal(p, root_pos)
+  assert torch.equal(q, root_quat)
+  assert torch.equal(qj, joint_pos)
+  assert torch.equal(v, lin_vel)
+  assert torch.equal(w, ang_vel)
+  assert torch.equal(vj, joint_vel)
