@@ -59,3 +59,29 @@ def test_windows_are_dropped_instead_of_crossing_a_reset():
   env_ids, positions = buffer.sample_windows(32, length=3)
   assert env_ids.numel() == 0
   assert positions.numel() == 0
+
+
+def test_window_may_end_on_the_terminal_frame():
+  """Official windows are done-free except for the last frame (L=8, 7 steps).
+
+  The transition *into* a terminated state is still supervised; requiring the
+  whole window to be done-free silently drops it from world-model training.
+  """
+  buffer = ReplayBuffer(1, 16, 1, 1, 1, "cpu")
+  for t in range(10):
+    buffer.add(
+      state=torch.full((1, 1), float(t)),
+      action=torch.full((1, 1), float(t)),
+      reward=torch.zeros(1),
+      done=torch.tensor([t == 7]),
+      context=torch.zeros(1, 1),
+      clip_id=torch.zeros(1, dtype=torch.long),
+      time_step=torch.full((1,), t, dtype=torch.long),
+    )
+  env_ids, positions = buffer.sample_windows(256, length=8)
+  states, actions, dones = buffer.gather_states(env_ids, positions, before=7)
+  assert states.shape == (256, 8, 1)
+  assert actions.shape == (256, 8, 1)
+  # The first L-1 = 7 frames must be in-episode; the 8th may be terminal.
+  assert not dones[:, :7].any()
+  assert dones[:, -1].all()

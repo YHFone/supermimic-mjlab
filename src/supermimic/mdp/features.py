@@ -95,8 +95,8 @@ def make_state(
   joint_pos: torch.Tensor,
   joint_vel: torch.Tensor,
 ) -> torch.Tensor:
-  """Assemble the full state ``[p, q, v, ω, qj, vj]`` (local column order)."""
+  """Assemble the full state ``[p, q, qj, v, ω, vj]`` (official column order)."""
   return torch.cat(
-    [root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos, joint_vel],
+    [root_pos, root_quat, joint_pos, root_lin_vel, root_ang_vel, joint_vel],
     dim=-1,
   )

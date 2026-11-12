@@ -113,7 +113,7 @@ class SuperMimicPolicy:
     trainer = self.trainer
     env = trainer.env
     state = trainer.extractor.state()
-    obs_t = trainer.observation(state)
+    obs_t = trainer.observation(state, sensor=trainer._env_sensor)
     if self._first:
       reset = torch.ones(self.n, dtype=torch.bool, device=trainer.device)
       self._first = False
@@ -151,9 +151,12 @@ class RandomPolicy:
 
 
 def _build_env_cfg(args: PlayArgs, files, *, interactive: bool):
+  # Official play protocol (``supermimic/scripts/play.py`` +
+  # ``mjlab_research/.../tracking/config/g1/env_cfgs.py:88-101``): keep the
+  # startup domain randomization and the joint-position reset noise, keep the
+  # effectively infinite episode length, and only drop the RSI pose/velocity
+  # randomization.
   env_cfg = unitree_g1_supermimic_env_cfg(files, num_envs=args.num_envs, play=True)
-  env_cfg.events = {}
-  env_cfg.episode_length_s = 60.0
   env_cfg.viewer.width = args.width
   env_cfg.viewer.height = args.height
   env_cfg.viewer.distance = args.distance
@@ -166,7 +169,6 @@ def _build_env_cfg(args: PlayArgs, files, *, interactive: bool):
   command_cfg.sampling_mode = "start"
   command_cfg.pose_range = {}
   command_cfg.velocity_range = {}
-  command_cfg.joint_position_range = (0.0, 0.0)
   if args.no_terminations:
     env_cfg.terminations = {}
   env_cfg.auto_reset = interactive
@@ -196,7 +198,7 @@ def _run_video(args: PlayArgs, files) -> None:
   command.reset_to_frame(env_ids, clip_index, args.start_frame)
   env.sim.forward()
   state = trainer.extractor.state()
-  obs = trainer.observation(state)
+  obs = trainer.observation(state, sensor=trainer._env_sensor)
   trainer.last_action.zero_()
 
   reference_env = None
@@ -208,7 +210,6 @@ def _run_video(args: PlayArgs, files) -> None:
     reference_env.reset()
 
   frames: list[np.ndarray] = []
-  n = env.num_envs
   try:
     for step in range(args.video_length):
       frame_index = args.start_frame + step
@@ -217,6 +218,8 @@ def _run_video(args: PlayArgs, files) -> None:
         action = actor.act(obs, goal)
       _, _, terminated, truncated, _ = env.step(action)
       next_state = trainer.extractor.state()
+      if trainer.actor_obs_mode == "proprio":
+        trainer._env_sensor = env.get_observations()["proprio"]
       reference = trainer.library.gather(command.clip_ids, command.time_steps, 1)
       reward, terms = trainer.reward(
         next_state,
@@ -225,7 +228,7 @@ def _run_video(args: PlayArgs, files) -> None:
         {k: v[:, 0] for k, v in reference.items()},
       )
       trainer.last_action = action
-      obs = trainer.observation(next_state)
+      obs = trainer.observation(next_state, sensor=trainer._env_sensor)
       policy_frame = env.render()
       if policy_frame is None:
         raise RuntimeError("Environment did not return an RGB frame.")

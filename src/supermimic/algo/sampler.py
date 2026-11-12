@@ -56,9 +56,10 @@ class ReturnSampler:
     lengths = clip_lengths.cpu().tolist()
     self.clip_lengths = list(lengths)
     self.frame_count = int(sum(lengths))
-    self.bin_count = max(
-      1, int(round(self.frame_count * frame_dt / self.cfg.bin_size_s))
-    )
+    # Official: ``int(T // (1 / step_dt)) + 1`` with a one-second bin
+    # (``mjlab_research/.../tracking/mdp/commands.py:166``).
+    frames_per_bin = max(1.0, self.cfg.bin_size_s / frame_dt)
+    self.bin_count = max(1, int(self.frame_count // frames_per_bin) + 1)
     self.bin_frames = max(1, int(round(self.cfg.bin_size_s / frame_dt)))
     self.v_max = self.cfg.max_step_reward / (1.0 - self.cfg.gamma)
 

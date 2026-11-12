@@ -47,6 +47,16 @@ class MotionLibraryCommandCfg(CommandTermCfg):
     return MotionLibraryCommand(self, env)
 
 
+def max_step_reward_ceiling(env: ManagerBasedRlEnv) -> float:
+  """Analytic per-step reward ceiling: dt-scaled positive reward weights.
+
+  Official ``WorldModelEnv.__init__`` (``envs/world_model_env.py:59-63``).
+  """
+  return float(env.step_dt) * sum(
+    term.weight for term in env.cfg.rewards.values() if term.weight > 0.0
+  )
+
+
 class MotionLibraryCommand(CommandTerm):
   cfg: MotionLibraryCommandCfg
 
@@ -97,7 +107,10 @@ class MotionLibraryCommand(CommandTerm):
       self.library.dt,
       self.device,
       num_envs=self.num_envs,
-      cfg=ReturnSamplerCfg(bin_size_s=cfg.bin_size_s),
+      cfg=ReturnSamplerCfg(
+        bin_size_s=cfg.bin_size_s,
+        max_step_reward=max_step_reward_ceiling(env),
+      ),
     )
 
     self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
@@ -371,6 +384,8 @@ class MotionLibraryCommand(CommandTerm):
     joint_pos: torch.Tensor,
     joint_vel: torch.Tensor,
   ) -> None:
+    limits = self.soft_joint_pos_limits[env_ids]
+    joint_pos = torch.clip(joint_pos, limits[..., 0], limits[..., 1])
     self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
     root_state = torch.cat([root_pos, root_quat, root_lin_vel, root_ang_vel], dim=-1)
     self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
@@ -404,7 +419,7 @@ class MotionLibraryCommand(CommandTerm):
     """
     if self.cfg.sampling_mode != "return":
       return False
-    clip_end = self.is_motion_end()
+    clip_end = self._clip_end_flags()
     return self.sampler.record(
       pre_frames,
       rewards,
@@ -412,6 +427,23 @@ class MotionLibraryCommand(CommandTerm):
       clip_end,
       truncated & ~clip_end,
     )
+
+  def _clip_end_flags(self) -> torch.Tensor:
+    """``motion_end`` as evaluated by the env during the last step.
+
+    ``env.step`` auto-resets finished environments before it returns and the
+    reset resamples ``time_steps`` for exactly those envs, so recomputing the
+    clip end here would read the *new* episode and report ``False`` for every
+    clip that just ended -- collapsing the clip-end bucket into plain time-outs.
+    The termination manager keeps what the step actually computed.
+    """
+    manager = getattr(self._env, "termination_manager", None)
+    if manager is not None:
+      try:
+        return manager.get_term("motion_end").to(torch.bool)
+      except (KeyError, ValueError):
+        pass
+    return self.is_motion_end()
 
   def reset_to_frame(self, env_ids: torch.Tensor, clip_id: int, frame: int) -> None:
     n = len(env_ids)

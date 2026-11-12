@@ -199,9 +199,12 @@ paper's 9.8 hours on two H100s.
    ``torch.compile`` caches per batch shape. If you change
    ``--sm.policy-batch-size``, the first iteration compiles again.
 
-The world model and actor are saved as ``checkpoint_<iteration>.pt`` and
-``checkpoint_final.pt``. Ctrl+C saves ``checkpoint_interrupt.pt``. Logs are
-printed as an rsl-rl-style table and written to TensorBoard.
+Every ``--sm.save-interval`` steps (and once at step 0), the run directory is
+overwritten with the official checkpoint layout: ``world_model.pt`` (world
+model + representation + config), ``actor.pt`` and ``critic.pt``. Ctrl+C and a
+normal finish write the same three files, so a run directory is always the
+play/evaluate entry point. Logs are printed as an rsl-rl-style table and
+written to TensorBoard.
 
 Each run writes to its own timestamped directory,
 ``<log-dir>/<experiment-name>/<YYYY-MM-DD_HH-MM-SS>/`` (for example
@@ -218,7 +221,7 @@ Play and visualize
 .. code-block:: bash
 
    python -m supermimic.scripts.play \
-       --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
+       --checkpoint logs/supermimic/g1_supermimic/<timestamp> \
        --motion-dir /data/supermimic/g1_1200 \
        --viewer viser --viser-port 8091
 
@@ -245,7 +248,7 @@ Evaluation
 .. code-block:: bash
 
    python -m supermimic.scripts.evaluate \
-       --checkpoint logs/supermimic/g1_supermimic/<timestamp>/checkpoint_final.pt \
+       --checkpoint logs/supermimic/g1_supermimic/<timestamp> \
        --motion-dir /data/supermimic/g1_1200 \
        --num-envs 64 --episodes-per-env 4
 

@@ -6,7 +6,7 @@ The official implementation (``HybridRobotics/supermimic``,
 state:
 
 ===== ==========================================================================
-full  ``[root_pos(3), root_quat(4), v_w(3), ω_w(3), qj(J), vj(J)]``  = 13 + 2J
+full  ``[root_pos(3), root_quat(4), qj(J), v_w(3), ω_w(3), vj(J)]``  = 13 + 2J
 aux   ``[root_pos(3), root_quat(4)]``                                 = 7
 rep   ``[z(1), g_b(3), v_b(3), ω_b(3), qj(J), vj(J)]``                = 10 + 2J
 pred  ``[Δv_b(3), Δω_b(3), Δvj(J)]``                                  = 6 + J
@@ -19,11 +19,9 @@ pose lives in :attr:`aux`), and the network predicts **acceleration-level
 deltas** which :meth:`GenCoordRepresentation.apply_prediction` integrates
 semi-implicitly with ``substep_coeff = (d + 1) / (2 d)``.
 
-The *full* state keeps this package's existing column order
-``[p, q, v, ω, qj, vj]`` (joints last) instead of the official
-``[p, q, qj, v, ω, vj]``; every learned interface (rep, aux, pred, goal) is
-byte-identical to the official one, and the reordering keeps the local FK and
-reward code unchanged.
+The *full* state uses the official column order ``[p, q, qj, v, ω, vj]``
+(``utils/gencoord_helpers.py:3``); ``decompose_full_state`` is the single
+place that knows the offsets.
 """
 
 from __future__ import annotations
@@ -42,24 +40,66 @@ from mjlab.utils.lab_api.math import (
 
 DOWN_WORLD = (0.0, 0.0, -1.0)
 
+PROPRIO_NOISE_HALF_WIDTHS: dict[str, float] = {
+  "projected_gravity": 0.05,
+  "base_ang_vel": 0.2,
+  "joint_pos": 0.01,
+  "joint_vel": 0.5,
+  "actions": 0.0,
+}
+"""Per-term uniform proprio noise half-widths (official ``representations.py:114``)."""
+
 
 def quat_integrate(quat: torch.Tensor, angular_velocity: torch.Tensor, dt: float) -> torch.Tensor:
-  """Right-multiply ``quat`` by the rotation ``ω dt`` (world frame).
+  """Left-multiply ``quat`` by the world-frame rotation ``ω dt``.
+
+  ``angular_velocity`` is expressed in the world frame (the caller passes
+  ``quat_apply(root_quat, ω_b + c Δω_b)``), so the delta quaternion acts on the
+  left: ``q_next = δ ⊗ q``.  Right-multiplying instead integrates about the
+  *body* axes and silently tilts the root whenever yaw and the rotation axis
+  are not collinear (up to ~50° after a 32-step imagination rollout).
 
   Args:
     quat: ``(B, 4)`` unit quaternion in wxyz.
     angular_velocity: ``(B, 3)`` world-frame angular velocity.
     dt: integration step.
   """
-  angle = torch.linalg.vector_norm(angular_velocity, dim=-1, keepdim=True) * dt
-  half = 0.5 * angle
-  small = angle < 1e-6
-  safe = angle.clamp_min(1e-6)
-  # sin(θ/2) / |ω| = sin(θ/2) * dt / angle
-  scale = torch.where(small, 0.5 * dt - angle.pow(2) * dt / 48.0, torch.sin(half) / safe)
-  delta = torch.cat([torch.cos(half), angular_velocity * scale], dim=-1)
-  out = quat_mul(quat, delta)
-  return out / torch.linalg.vector_norm(out, dim=-1, keepdim=True).clamp_min(1e-8)
+  omega = angular_velocity * dt
+  norm_sq = (omega * omega).sum(dim=-1, keepdim=True)
+  norm_safe = torch.sqrt(norm_sq + 1e-8)
+  half = 0.5 * norm_safe
+  axis = omega / norm_safe
+  delta = torch.cat([torch.cos(half), torch.sin(half) * axis], dim=-1)
+  out = quat_mul(delta, quat)
+  return out / torch.linalg.vector_norm(out, dim=-1, keepdim=True)
+
+
+def full_state_offsets(num_joints: int) -> tuple[int, int, int, int]:
+  """Start offsets of ``qj``, root linear/angular velocity and ``vj``.
+
+  Official full state (``utils/gencoord_helpers.py:24-43``):
+  ``[root_pos(3), root_quat(4), qj(J), root_lin_vel(3), root_ang_vel(3), vj(J)]``.
+  """
+  idx_qj = 7
+  idx_lin = idx_qj + num_joints
+  idx_ang = idx_lin + 3
+  idx_vj = idx_ang + 3
+  return idx_qj, idx_lin, idx_ang, idx_vj
+
+
+def decompose_full_state(
+  full_state: torch.Tensor, num_joints: int
+) -> tuple[torch.Tensor, ...]:
+  """Split the official full state into ``(p, q, qj, v_w, ω_w, vj)``."""
+  idx_qj, idx_lin, idx_ang, idx_vj = full_state_offsets(num_joints)
+  return (
+    full_state[..., 0:3],
+    full_state[..., 3:7],
+    full_state[..., idx_qj:idx_lin],
+    full_state[..., idx_lin:idx_ang],
+    full_state[..., idx_ang:idx_vj],
+    full_state[..., idx_vj:],
+  )
 
 
 def decompose_rep_state(rep: torch.Tensor, num_joints: int) -> tuple[torch.Tensor, ...]:
@@ -115,12 +155,7 @@ class GenCoordRepresentation(nn.Module):
 
   def represent(self, full_state: torch.Tensor) -> torch.Tensor:
     """``[z, g_b, v_b, ω_b, qj, vj]``; horizontal position and quat are dropped."""
-    p = full_state[..., 0:3]
-    q = full_state[..., 3:7]
-    v_w = full_state[..., 7:10]
-    w_w = full_state[..., 10:13]
-    qj = full_state[..., 13 : 13 + self.num_joints]
-    vj = full_state[..., 13 + self.num_joints :]
+    p, q, qj, v_w, w_w, vj = decompose_full_state(full_state, self.num_joints)
     down = self.down_world.to(full_state.dtype).expand_as(v_w)
     g_b = quat_apply_inverse(q, down)
     v_b = quat_apply_inverse(q, v_w)
@@ -184,6 +219,36 @@ class GenCoordRepresentation(nn.Module):
   # ------------------------------------------------------------------
   # rep + aux -> full (for FK / reward)
   # ------------------------------------------------------------------
+  def proprio_term_widths(self, num_actions: int) -> list[int]:
+    """Widths of the proprio terms, in layout order."""
+    return [3, 3, self.num_joints, self.num_joints, num_actions]
+
+  def proprio_obs_dim(self, num_actions: int) -> int:
+    return sum(self.proprio_term_widths(num_actions))
+
+  def proprio_noise_bounds(
+    self, num_actions: int, device: torch.device | str
+  ) -> torch.Tensor:
+    """Per-dim uniform-noise half-widths matching the proprio layout."""
+    widths = self.proprio_term_widths(num_actions)
+    halves = PROPRIO_NOISE_HALF_WIDTHS.values()
+    return torch.cat(
+      [torch.full((w,), h, device=device) for w, h in zip(widths, halves)]
+    )
+
+  def add_proprio_noise(
+    self, obs: torch.Tensor, num_actions: int | None = None
+  ) -> torch.Tensor:
+    """Per-dim uniform proprio jitter (official ``add_proprio_noise``).
+
+    The official implementation owns the noise here (the env observation group
+    runs with ``enable_corruption=False``) so that the real-sim history, the
+    imagination rollout and the exporter share one spec.
+    """
+    actions = self.num_joints if num_actions is None else num_actions
+    bounds = self.proprio_noise_bounds(actions, obs.device).to(obs.dtype)
+    return obs + ((torch.rand_like(obs) * 2 - 1) * bounds).detach()
+
   def reconstruct_full_state(
     self, aux_state: torch.Tensor, rep_state: torch.Tensor
   ) -> torch.Tensor:
@@ -193,7 +258,8 @@ class GenCoordRepresentation(nn.Module):
     root_pos = torch.cat([root_pos[..., :2], z], dim=-1)
     v_global = quat_apply(root_quat, v_b)
     w_global = quat_apply(root_quat, w_b)
-    return torch.cat([root_pos, root_quat, v_global, w_global, qj, vj], dim=-1)
+    # Official order: [p, q, qj, v_w, ω_w, vj].
+    return torch.cat([root_pos, root_quat, qj, v_global, w_global, vj], dim=-1)
 
   # ------------------------------------------------------------------
   # loss / observation helpers

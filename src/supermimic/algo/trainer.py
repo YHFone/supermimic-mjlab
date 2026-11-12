@@ -20,7 +20,7 @@ import math
 import statistics
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,7 +36,11 @@ from supermimic.algo.networks import (
   WorldModel,
   WorldModelCfg,
 )
-from supermimic.algo.representation import GenCoordCfg, GenCoordRepresentation
+from supermimic.algo.representation import (
+  GenCoordCfg,
+  GenCoordRepresentation,
+  decompose_full_state,
+)
 from supermimic.algo.reward import (
   TrackingReward,
   TrackingRewardCfg,
@@ -48,7 +52,7 @@ from supermimic.algo.state import (
   SuperMimicStateSpec,
   build_kinematics,
 )
-from supermimic.mdp.commands import MotionLibraryCommand
+from supermimic.mdp.commands import MotionLibraryCommand, max_step_reward_ceiling
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -99,7 +103,24 @@ class SuperMimicTrainer:
     log_dir: str | Path | None = None,
   ) -> None:
     self.env = env
-    self.cfg = cfg
+    # Official: the reward ceiling and the soft-termination thresholds come from
+    # the live env config, not from hard-coded constants
+    # (``envs/world_model_env.py:59-76``).
+    self.max_step_reward = max_step_reward_ceiling(env)
+    terms = env.cfg.terminations
+    self.cfg = replace(
+      cfg,
+      termination_pos_threshold=float(
+        terms["anchor_pos"].params["threshold"]
+        if "anchor_pos" in terms
+        else cfg.termination_pos_threshold
+      ),
+      termination_ori_threshold=float(
+        terms["anchor_ori"].params["threshold"]
+        if "anchor_ori" in terms
+        else cfg.termination_ori_threshold
+      ),
+    )
     self.device = torch.device(cfg.device)
     self.log_dir = Path(log_dir or cfg.log_dir) / cfg.experiment_name
     self.iteration = 0
@@ -151,7 +172,12 @@ class SuperMimicTrainer:
 
     self.policy_mode = cfg.policy_mode
     self.gamma = cfg.gamma if cfg.policy_mode == "actor-critic" else cfg.bptt_gamma
-    self.obs_dim = self.representation.rep_state_dim
+    self.actor_obs_mode = cfg.actor_obs_mode
+    self.obs_dim = (
+      self.representation.proprio_obs_dim(self.spec.action_dim)
+      if self.actor_obs_mode == "proprio"
+      else self.representation.rep_state_dim
+    )
     self.actor_goal_dim = self.command.goal_features.actor_dim
     self.wm_goal_dim = self.command.goal_features.wm_dim
 
@@ -203,10 +229,21 @@ class SuperMimicTrainer:
         encoder_hidden=cfg.encoder_hidden_dims,
         decoder_hidden=cfg.decoder_hidden_dims,
         critic_hidden=cfg.critic_hidden_dims,
-        max_step_reward=0.1,
+        max_step_reward=self.max_step_reward,
         gamma=cfg.gamma,
       )
     ).to(self.device)
+
+    # Official compiles the actor used inside the imagined rollout
+    # (``learners/policy_learner.py:78-80``).  The eager rollout keeps every
+    # Linear/LayerNorm/GELU intermediate of the 32-step, 4096-sample BPTT graph
+    # alive until backward, which costs ~3.7 GiB more than the compiled graph
+    # and leaves no room for the simulator on a 24 GiB card.
+    self._rollout_act = (
+      torch.compile(self.actor_critic.act, mode="default")
+      if cfg.compile and torch.cuda.is_available()
+      else self.actor_critic.act
+    )
 
     self.wm_optimizers = build_optimizers([self.world_model], cfg.wm_lr)
     self.actor_params = list(self.actor_critic.encoder.parameters()) + list(
@@ -221,6 +258,24 @@ class SuperMimicTrainer:
       [self.actor_critic.critic], cfg.critic_lr
     )
 
+    # Official: the world-model rollout and loss are compiled, and the whole
+    # optimizer step is captured as one CUDA graph (``learners/wm_learner.py:70-76``).
+    self._wm_loss_fn = (
+      torch.compile(self._wm_rollout_loss, mode="default")
+      if cfg.compile_world_model
+      else self._wm_rollout_loss
+    )
+    if cfg.use_cuda_graph and torch.cuda.is_available():
+      self._wm_step = CapturedUpdate(
+        self._wm_update_from,
+        lambda: graph_state(
+          [self.world_model, self.representation], self.wm_optimizers
+        ),
+        warmup=3,
+      )
+    else:
+      self._wm_step = self._wm_update_from
+
     self._graph_state_fn = lambda: graph_state(
       [self.actor_critic, self.world_model, self.representation],
       [*self.actor_optimizers, *self.critic_optimizers],
@@ -234,6 +289,8 @@ class SuperMimicTrainer:
     self.last_action = torch.zeros(
       env.num_envs, self.spec.action_dim, device=self.device
     )
+    self._env_sensor: torch.Tensor | None = None
+    """Latest unnoised proprio sensor from the env (proprio mode only)."""
 
     self.episode_len = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
     self.episode_return = torch.zeros(env.num_envs, device=self.device)
@@ -264,12 +321,42 @@ class SuperMimicTrainer:
   # ------------------------------------------------------------------
   # observations
   # ------------------------------------------------------------------
-  def observation(self, full_state: torch.Tensor) -> torch.Tensor:
-    """The actor observation: the 68-dim GenCoord state."""
-    return self.representation.represent(full_state)
+  def _sensor_from_rep(
+    self, rep: torch.Tensor, last_action: torch.Tensor
+  ) -> torch.Tensor:
+    """Synthesize the proprio sensor from a GenCoord state.
+
+    Layout ``[projected_gravity(3), base_ang_vel(3), joint_pos_rel(J),
+    joint_vel(J), last_action(J)]`` (official ``compute_wm_obs``): projected
+    gravity and the body twist are already columns of the rep state.
+    """
+    joints = self.spec.num_joints
+    qj = rep[..., 10 : 10 + joints]
+    vj = rep[..., 10 + joints :]
+    joint_rel = qj - self.spec.default_joint_pos
+    return torch.cat([rep[..., 1:4], rep[..., 7:10], joint_rel, vj, last_action], dim=-1)
+
+  def observation(
+    self,
+    full_state: torch.Tensor,
+    *,
+    sensor: torch.Tensor | None = None,
+    noisy: bool = False,
+  ) -> torch.Tensor:
+    """The actor input: 68-dim rep state, or the 93-dim (noised) proprio sensor."""
+    rep = self.representation.represent(full_state)
+    if self.actor_obs_mode == "rep_state":
+      return rep
+    obs = sensor if sensor is not None else self._sensor_from_rep(rep, self.last_action)
+    if noisy:
+      obs = self.representation.add_proprio_noise(obs, self.spec.action_dim)
+    return obs
 
   def initialize(self) -> None:
-    self.env.reset()
+    obs = self.env.reset()
+    self._env_sensor = (
+      obs["proprio"] if self.actor_obs_mode == "proprio" and isinstance(obs, dict) else None
+    )
     self.episode_len.zero_()
     self.episode_return.zero_()
     self.episode_length.zero_()
@@ -302,7 +389,11 @@ class SuperMimicTrainer:
     for _ in range(steps):
       state = self.extractor.state()
       context = self.extractor.context()
-      obs = self.observation(state)
+      obs = (
+        self.observation(state, sensor=self._env_sensor, noisy=True)
+        if self.actor_obs_mode == "proprio"
+        else self.observation(state)
+      )
       wm_goal, actor_goal = self.command.goal()
       self.actor_critic.update_normalizers(obs, actor_goal)
       action = self.actor_critic.act(obs, actor_goal)
@@ -318,11 +409,12 @@ class SuperMimicTrainer:
       pre_frames = self.command.global_frame_index(clip_ids, time_steps)
       # Official: the env computes the reward and the termination flags before
       # the (auto) reset, so the values belong to the terminal state.
-      _, reward, terminated, truncated, extras = self.env.step(noisy_action)
-      if extras:
-        self._ep_extras.append(
-          {k: float(v) for k, v in extras.items() if k.startswith("Episode_Reward/")}
-        )
+      next_obs, reward, terminated, truncated, extras = self.env.step(noisy_action)
+      if self.actor_obs_mode == "proprio":
+        self._env_sensor = next_obs["proprio"]
+      episode_extras = _episode_reward_extras(extras)
+      if episode_extras:
+        self._ep_extras.append(episode_extras)
       done = terminated | truncated
       self.buffer.add(
         state,
@@ -378,53 +470,87 @@ class SuperMimicTrainer:
   # ------------------------------------------------------------------
   # world model
   # ------------------------------------------------------------------
+  def _sample_wm_batch(self) -> dict[str, torch.Tensor] | None:
+    """One fixed-shape window batch for the world-model update.
+
+    Sampling happens outside the captured update (official ``supermimic_runner
+    .py`` samples the batches and hands them to ``wm_learner.update``).  Rows
+    the buffer had to drop are padded by repeating the last one so that a
+    captured update always sees the same shapes.
+    """
+    cfg = self.cfg
+    env_ids, positions = self.buffer.sample_windows(
+      cfg.wm_batch_size, cfg.wm_window, generator=self._rng
+    )
+    if env_ids.numel() == 0:
+      return None
+    if env_ids.numel() < cfg.wm_batch_size:
+      pad = cfg.wm_batch_size - env_ids.numel()
+      env_ids = torch.cat([env_ids, env_ids[-1:].expand(pad)])
+      positions = torch.cat([positions, positions[-1:].expand(pad)])
+    states, actions, _ = self.buffer.gather_states(
+      env_ids, positions, before=cfg.wm_window - 1
+    )
+    return {
+      "states": states,
+      "actions": actions,
+      "context": self.buffer.contexts[env_ids, positions],
+    }
+
+  def _wm_rollout_loss(
+    self, states: torch.Tensor, actions: torch.Tensor, context: torch.Tensor
+  ) -> torch.Tensor:
+    """Autoregressive rollout + Bryson-weighted loss over ``k - 1`` steps.
+
+    Tensor arguments only, like the official ``wm_learner._rollout`` /
+    ``_compute_losses`` that ``torch.compile`` traces.
+    """
+    scored = max(1, self.cfg.wm_window - 1)  # official rollout stops one short
+    reps = self.representation.represent(states)
+    auxs = self.representation.extract_aux_state(states)
+    pred_aux, pred_rep = auxs[:, 0], reps[:, 0]
+    loss = torch.zeros((), device=reps.device)
+    for j in range(scored):
+      pred_aux, pred_rep = self.world_model(
+        pred_aux, pred_rep, actions[:, j], context
+      )
+      loss = loss + self.world_model.loss(
+        pred_aux, pred_rep, auxs[:, j + 1], reps[:, j + 1]
+      )
+    return loss / scored
+
+  def _wm_update_from(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """One world-model optimizer step (CUDA-graph / capture safe)."""
+    cfg = self.cfg
+    loss = self._wm_loss_fn(batch["states"], batch["actions"], batch["context"])
+    for optimizer in self.wm_optimizers:
+      optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), cfg.wm_grad_clip)
+    for optimizer in self.wm_optimizers:
+      optimizer.step()
+    return {"world_model/loss": loss.detach()}
+
   def _update_world_model(self) -> dict[str, float]:
     cfg = self.cfg
-    k = cfg.wm_window
-    scored = max(1, k - 1)  # official rollout stops one step short
+    scored = max(1, cfg.wm_window - 1)
     losses = []
     self.world_model.train()
     for _ in range(cfg.wm_updates_per_iter):
-      env_ids, positions = self.buffer.sample_windows(
-        cfg.wm_batch_size, k + 1, generator=self._rng
-      )
-      if env_ids.numel() == 0:
+      batch = self._sample_wm_batch()
+      if batch is None:
         continue
-      states, actions, _ = self.buffer.gather_states(env_ids, positions, before=k)
-      context = self.buffer.contexts[env_ids, positions]
-      reps = self.representation.represent(states)
-      auxs = self.representation.extract_aux_state(states)
-      pred_aux = auxs[:, 0]
-      pred_rep = reps[:, 0]
-      loss = torch.zeros((), device=self.device)
-      for j in range(scored):
-        pred_aux, pred_rep = self.world_model(
-          pred_aux, pred_rep, actions[:, j], context
-        )
-        loss = loss + self.world_model.loss(
-          pred_aux, pred_rep, auxs[:, j + 1], reps[:, j + 1]
-        )
-      loss = loss / scored
-      for optimizer in self.wm_optimizers:
-        optimizer.zero_grad(set_to_none=True)
-      if torch.isfinite(loss):
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-          self.world_model.parameters(), cfg.wm_grad_clip
-        )
-        for optimizer in self.wm_optimizers:
-          optimizer.step()
-      losses.append(float(loss.item()))
+      losses.append(self._wm_step(batch)["world_model/loss"])
 
+    group_rmse: dict[str, float] = {}
     with torch.no_grad():
-      env_ids, positions = self.buffer.sample_windows(
-        cfg.wm_batch_size, k + 1, generator=self._rng
-      )
-      if env_ids.numel() == 0:
+      batch = self._sample_wm_batch()
+      if batch is None:
         window_error = 0.0
       else:
-        states, actions, _ = self.buffer.gather_states(env_ids, positions, before=k)
-        context = self.buffer.contexts[env_ids, positions]
+        states = batch["states"]
+        actions = batch["actions"]
+        context = batch["context"]
         reps = self.representation.represent(states)
         auxs = self.representation.extract_aux_state(states)
         pred_aux, pred_rep = auxs[:, 0], reps[:, 0]
@@ -448,11 +574,11 @@ class SuperMimicTrainer:
           for k_, v in group_errors.items()
         }
     return {
-      "world_model/loss": float(torch.tensor(losses).mean().item())
+      "world_model/loss": float(torch.stack(losses).mean().item())
       if losses
       else 0.0,
       "world_model/window_error": window_error,
-      **(group_rmse if env_ids.numel() > 0 else {}),
+      **group_rmse,
     }
 
   # ------------------------------------------------------------------
@@ -499,13 +625,16 @@ class SuperMimicTrainer:
     cfg = self.cfg
     next_aux, next_rep = self.world_model(aux, rep, action, context)
     full_state = self.representation.reconstruct_full_state(next_aux, next_rep)
+    root_pos, root_quat, joint_pos, root_lin_vel, root_ang_vel, joint_vel = (
+      decompose_full_state(full_state, self.spec.num_joints)
+    )
     body_pos, body_quat, body_lin_vel, body_ang_vel = self.forward_kinematics(
-      full_state[:, 0:3],
-      full_state[:, 3:7],
-      full_state[:, 7:10],
-      full_state[:, 10:13],
-      full_state[:, 13 : 13 + self.spec.num_joints],
-      full_state[:, 13 + self.spec.num_joints :],
+      root_pos,
+      root_quat,
+      root_lin_vel,
+      root_ang_vel,
+      joint_pos,
+      joint_vel,
     )
     reward, _ = self.reward.forward_from_bodies(
       full_state,
@@ -573,7 +702,13 @@ class SuperMimicTrainer:
       prev_action = inputs["prev_action"][start_index:end_index]
       rep = self.representation.represent(state)
       aux = self.representation.extract_aux_state(state)
-      obs = rep
+      obs = (
+        self.representation.add_proprio_noise(
+          self._sensor_from_rep(rep, prev_action), self.spec.action_dim
+        )
+        if self.actor_obs_mode == "proprio"
+        else rep
+      )
 
       wm_goal, actor_goal = self._goal_for(clip_ids, time_steps, aux)
       chunk_rep: list[torch.Tensor] = [rep]
@@ -582,7 +717,7 @@ class SuperMimicTrainer:
       chunk_terms: list[torch.Tensor] = []
       times = time_steps
       for _t in range(cfg.horizon):
-        action = self.actor_critic.act(obs, actor_goal)
+        action = self._rollout_act(obs, actor_goal)
         reference = _squeeze(self.library.gather(clip_ids, times, 1))
         next_aux, next_rep, reward, term_prob = self._imagine_step(
           aux, rep, action, prev_action, context, reference
@@ -595,7 +730,13 @@ class SuperMimicTrainer:
         chunk_goals.append((wm_goal, actor_goal))
         aux, rep = next_aux, next_rep
         prev_action = action
-        obs = next_rep
+        obs = (
+          self.representation.add_proprio_noise(
+            self._sensor_from_rep(next_rep, action), self.spec.action_dim
+          )
+          if self.actor_obs_mode == "proprio"
+          else next_rep
+        )
 
       reward_sum = torch.zeros_like(chunk_rewards[0])
       survival = torch.ones_like(chunk_rewards[0])
@@ -690,8 +831,10 @@ class SuperMimicTrainer:
     cfg = self.cfg
     horizon = cfg.horizon
     with torch.no_grad():
+      # The official recursion uses raw critic values and clamps only the
+      # final targets (``policy_learner.py:177-187``).
       values = [
-        self.actor_critic.value(reps[t], goals[t], context)
+        self.actor_critic.value_raw(reps[t], goals[t], context)
         for t in range(horizon + 1)
       ]
       targets = [torch.zeros_like(values[0]) for _ in range(horizon)]
@@ -715,7 +858,9 @@ class SuperMimicTrainer:
     steps = 0
     for _ in range(cfg.critic_epochs):
       for idx in torch.chunk(perm, minibatches):
-        value = self.actor_critic.value(rep_flat[idx], goal_flat[idx], context_flat[idx])
+        value = self.actor_critic.value_raw(
+          rep_flat[idx], goal_flat[idx], context_flat[idx]
+        )
         loss = torch.mean((value - target_flat[idx]) ** 2)
         for optimizer in self.critic_optimizers:
           optimizer.zero_grad()
@@ -744,13 +889,16 @@ class SuperMimicTrainer:
     state = state.detach().clone().requires_grad_(True)
     start = time.perf_counter()
     with torch.enable_grad():
+      root_pos, root_quat, joint_pos, root_lin_vel, root_ang_vel, joint_vel = (
+        decompose_full_state(state, self.spec.num_joints)
+      )
       outputs = self.forward_kinematics(
-        state[:, 0:3],
-        state[:, 3:7],
-        state[:, 7:10],
-        state[:, 10:13],
-        state[:, 13 : 13 + self.spec.num_joints],
-        state[:, 13 + self.spec.num_joints :],
+        root_pos,
+        root_quat,
+        root_lin_vel,
+        root_ang_vel,
+        joint_pos,
+        joint_vel,
       )
       sum(output.square().mean() for output in outputs).backward()
     torch.cuda.synchronize()
@@ -788,25 +936,33 @@ class SuperMimicTrainer:
     window_metrics: dict[str, float] = {}
     window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
     window_rounds = 0.0
+    window_iters = 0
+    window_start = time.time()
     while self.iteration < cfg.num_iterations:
-      iteration_start = time.time()
       logs: dict[str, float] = {}
       t_collect = time.perf_counter()
       logs.update(self._collect(1))
-      t_world_model = time.perf_counter()
+      t_after_collect = time.perf_counter()
       train_rounds = 0
+      # Time each phase where it runs: with a fractional ratio a round fires on
+      # only some iterations, so a single bracket around the loop would bill the
+      # idle iterations to the world model.
+      wm_seconds = 0.0
+      policy_seconds = 0.0
       for _ in range(should_train(self.iteration)):
         if int(self.buffer.count.min().item()) < cfg.wm_window:
           continue
+        t0 = time.perf_counter()
         logs.update(self._update_world_model())
+        t1 = time.perf_counter()
+        wm_seconds += t1 - t0
         logs.update(self._update_policy())
+        policy_seconds += time.perf_counter() - t1
         train_rounds += 1
-      t_policy = time.perf_counter()
       logs["train/rounds"] = float(train_rounds)
-      t_end = time.perf_counter()
-      logs["time/collect"] = t_world_model - t_collect
-      logs["time/world_model"] = t_policy - t_world_model
-      logs["time/policy"] = t_end - t_policy
+      logs["time/collect"] = t_after_collect - t_collect
+      logs["time/world_model"] = wm_seconds
+      logs["time/policy"] = policy_seconds
       self._set_lr(self.iteration)
       self.iteration += 1
 
@@ -817,15 +973,26 @@ class SuperMimicTrainer:
           window_metrics[key] = value
       window_rounds += train_rounds
 
-      if cfg.log_interval > 0 and (
-        self.iteration % cfg.log_interval == 0 or self.iteration == cfg.num_iterations
-      ):
+      # Official phase: ``step % interval == 0`` with ``step`` starting at 0, so
+      # the first log and the first save both happen at step 0
+      # (``supermimic_runner.py:726-748``).
+      step = self.iteration - 1
+      if cfg.log_interval > 0 and step % cfg.log_interval == 0:
         merged = {**window_metrics, **window_time, "train/rounds": window_rounds}
-        self._log_iteration(merged, time.time() - iteration_start)
+        # Official: ``iteration_time = collect + wm_learn + policy_learn``
+        # (``utils/logger.py:189``).  All three are totals over the log window,
+        # so the three lines add up to the printed iteration time.  Passing the
+        # last iteration's wall time instead made them look inconsistent.
+        window_elapsed = (
+          merged["time/collect"]
+          + merged["time/world_model"]
+          + merged["time/policy"]
+        )
+        self._log_iteration(merged, window_elapsed)
         window_metrics.clear()
         window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
         window_rounds = 0.0
-      if cfg.save_interval > 0 and self.iteration % cfg.save_interval == 0:
+      if cfg.save_interval > 0 and step % cfg.save_interval == 0:
         self.save()
 
   def _log_iteration(self, logs: dict[str, float], iteration_time: float) -> None:
@@ -889,9 +1056,9 @@ class SuperMimicTrainer:
       f"{f' Learning iteration {it}/{total} ':^{width}}\n\n",
       line("Total steps", f"{self.env_steps:,}"),
       line("Steps per second", f"{fps:.0f}"),
-      line("Collection time", f"{g('time/collect'):.3f}s"),
-      line("World-model time", f"{g('time/world_model'):.3f}s"),
-      line("Policy time", f"{g('time/policy'):.3f}s"),
+      line("Collection time (avg)", f"{g('time/collect'):.3f}s"),
+      line("World-model time (avg)", f"{g('time/world_model'):.3f}s"),
+      line("Policy time (avg)", f"{g('time/policy'):.3f}s"),
       line("Mean world model loss", f"{g('world_model/loss'):.4f}"),
       line(
         "Mean world model 7-step error",
@@ -911,7 +1078,7 @@ class SuperMimicTrainer:
       line("Mean reward per step", f"{mean_step_reward:.4f}"),
       line("Mean action std", f"{mean_action_std:.4f}"),
       line("Success rate", success_rate),
-      line("Training rounds", f"{int(g('train/rounds'))}"),
+      line("Training rounds (window)", f"{int(g('train/rounds'))}"),
       line("Done rate", f"{g('collect/done_rate'):.4f}"),
       line("Bad gradients", f"{int(g('policy/bad_grads'))}"),
       line("Learning rate", f"{self.actor_optimizers[0].param_groups[0]['lr']:.2e}"),
@@ -926,7 +1093,7 @@ class SuperMimicTrainer:
     lines.extend(
       [
         f"{'-' * width}\n",
-        line("Iteration time", f"{iteration_time:.2f}s"),
+        line("Iteration time (avg)", f"{iteration_time:.3f}s"),
         line("Time elapsed", time.strftime("%H:%M:%S", time.gmtime(elapsed))),
         line(
           "ETA",
@@ -995,9 +1162,14 @@ class SuperMimicTrainer:
           else:
             group["lr"] = base * scale
 
-  def save(self, name: str | None = None) -> Path:
+  def save(self) -> Path:
+    """Write the official checkpoint layout into the log directory.
+
+    The official runner writes fixed-name ``world_model.pt`` / ``actor.pt`` /
+    ``critic.pt`` at every ``save_interval`` (``supermimic_runner.py:750-777``)
+    instead of a data-stamped single file.
+    """
     self.log_dir.mkdir(parents=True, exist_ok=True)
-    path = self.log_dir / (name or f"checkpoint_{self.iteration:07d}.pt")
     torch.save(
       {
         **stamp(
@@ -1006,36 +1178,87 @@ class SuperMimicTrainer:
             "env_steps": self.env_steps,
             "actor_goal_dim": self.actor_goal_dim,
             "wm_goal_dim": self.wm_goal_dim,
+            "cfg": asdict(self.cfg),
           }
         ),
         "world_model": self.world_model.state_dict(),
-        "actor_critic": self.actor_critic.state_dict(),
-        "cfg": asdict(self.cfg),
+        "representation": self.representation.state_dict(),
       },
-      path,
+      self.log_dir / "world_model.pt",
     )
-    print(f"[INFO] Saved checkpoint to {path}", flush=True)
-    return path
+    torch.save(
+      {
+        **stamp(),
+        "encoder": self.actor_critic.encoder.state_dict(),
+        "decoder": self.actor_critic.decoder.state_dict(),
+        "obs_norm": self.actor_critic.obs_norm.state_dict(),
+        "goal_norm": self.actor_critic.goal_norm.state_dict(),
+      },
+      self.log_dir / "actor.pt",
+    )
+    torch.save(
+      {**stamp(), "critic": self.actor_critic.critic.state_dict()},
+      self.log_dir / "critic.pt",
+    )
+    print(f"[INFO] Saved checkpoints to {self.log_dir}", flush=True)
+    return self.log_dir
 
   def load(self, path: str | Path) -> None:
-    checkpoint = torch.load(path, map_location=self.device)
-    check_version(checkpoint.get("schema_version"), what="checkpoint")
-    self.world_model.load_state_dict(checkpoint["world_model"], strict=False)
+    """Load a run directory (official three-file layout) or a legacy single file."""
+    path = Path(path)
+    if path.is_dir():
+      bundle = torch.load(path / "world_model.pt", map_location=self.device)
+      check_version(bundle.get("schema_version"), what="world_model.pt")
+      self.world_model.load_state_dict(bundle["world_model"])
+      if "representation" in bundle:
+        self.representation.load_state_dict(bundle["representation"])
+      actor = torch.load(path / "actor.pt", map_location=self.device)
+      check_version(actor.get("schema_version"), what="actor.pt")
+      self.actor_critic.encoder.load_state_dict(actor["encoder"])
+      self.actor_critic.decoder.load_state_dict(actor["decoder"])
+      self.actor_critic.obs_norm.load_state_dict(actor["obs_norm"])
+      self.actor_critic.goal_norm.load_state_dict(actor["goal_norm"])
+      critic_path = path / "critic.pt"
+      if critic_path.is_file():
+        critic = torch.load(critic_path, map_location=self.device)
+        check_version(critic.get("schema_version"), what="critic.pt")
+        self.actor_critic.critic.load_state_dict(critic["critic"])
+      self.iteration = int(bundle.get("iteration", 0))
+      self.env_steps = int(bundle.get("env_steps", 0))
+      return
+    legacy = torch.load(path, map_location=self.device)
+    check_version(legacy.get("schema_version"), what="checkpoint")
+    self.world_model.load_state_dict(legacy["world_model"], strict=False)
     missing, unexpected = self.actor_critic.load_state_dict(
-      checkpoint["actor_critic"], strict=False
+      legacy["actor_critic"], strict=False
     )
     if missing or unexpected:
       print(
         f"[WARN] Loaded checkpoint with missing={len(missing)} "
         f"unexpected={len(unexpected)} keys."
       )
-    self.iteration = int(checkpoint.get("iteration", 0))
-    self.env_steps = int(checkpoint.get("env_steps", 0))
-    print(f"[INFO] Loaded checkpoint {path} (schema v{SCHEMA_VERSION})")
+    self.iteration = int(legacy.get("iteration", 0))
+    self.env_steps = int(legacy.get("env_steps", 0))
 
   def close(self) -> None:
     if self._writer is not None:
       self._writer.close()
+
+
+def _episode_reward_extras(extras: dict | None) -> dict[str, float]:
+  """``Episode_Reward/*`` scalars from an mjlab step's extras.
+
+  mjlab nests manager logs under ``extras["log"]`` (``reward_manager.py`` writes
+  ``Episode_Reward/<term>`` there), so a flat scan of ``extras`` finds nothing.
+  """
+  if not extras:
+    return {}
+  log = extras.get("log", extras)
+  return {
+    key: float(value)
+    for key, value in log.items()
+    if key.startswith("Episode_Reward/")
+  }
 
 
 class Ratio:

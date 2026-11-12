@@ -99,10 +99,10 @@ def main() -> None:
     trainer.load(args.resume)
   try:
     trainer.train()
-    trainer.save("checkpoint_final.pt")
+    trainer.save()
   except KeyboardInterrupt:
-    print("[INFO] Interrupted; saving checkpoint_interrupt.pt ...", flush=True)
-    trainer.save("checkpoint_interrupt.pt")
+    print("[INFO] Interrupted; saving the checkpoint ...", flush=True)
+    trainer.save()
   finally:
     trainer.close()
     env.close()

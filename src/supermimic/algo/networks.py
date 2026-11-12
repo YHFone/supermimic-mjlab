@@ -152,7 +152,8 @@ class ActorCriticCfg:
   encoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
   decoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
   critic_hidden: tuple[int, ...] = (256, 128)
-  activation: str = "elu"
+  activation: str = "gelu"
+  """MLP activation; the official ``build_mlp`` is ``Linear → LN → GELU``."""
   max_step_reward: float = 0.1
   gamma: float = 0.99
 
@@ -185,11 +186,22 @@ class ActorCritic(nn.Module):
     z = torch.tanh(self.encoder(self.goal_norm(goal)))
     return self.decoder(torch.cat([z, self.obs_norm(obs)], dim=-1))
 
+  def value_raw(
+    self, rep_state: torch.Tensor, goal: torch.Tensor, context: torch.Tensor
+  ) -> torch.Tensor:
+    """Unclamped critic value.
+
+    The official learner only clamps the bootstrap value and the final GAE
+    targets (``policy_learner.py:169,187``); the recursion and the regression
+    use raw values.
+    """
+    x = torch.cat([rep_state, goal, context], dim=-1)
+    return self.critic(x).squeeze(-1)
+
   def value(
     self, rep_state: torch.Tensor, goal: torch.Tensor, context: torch.Tensor
   ) -> torch.Tensor:
-    x = torch.cat([rep_state, goal, context], dim=-1)
-    return self.critic(x).squeeze(-1).clamp(max=self.v_max)
+    return self.value_raw(rep_state, goal, context).clamp(max=self.v_max)
 
   @torch.no_grad()
   def update_normalizers(self, obs: torch.Tensor, goal: torch.Tensor) -> None:

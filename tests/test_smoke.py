@@ -89,7 +89,7 @@ def test_training_smoke(tmp_path):
   trainer = SuperMimicTrainer(env, cfg)
   try:
     trainer.train()
-    path = trainer.save("final.pt")
+    path = trainer.save()
     assert path.exists()
   finally:
     trainer.close()

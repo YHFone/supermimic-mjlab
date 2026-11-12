@@ -104,7 +104,7 @@ def main() -> None:
   for _ in range(args.max_steps):
     state = trainer.extractor.state()
     context = trainer.extractor.context()
-    obs = trainer.observation(state)
+    obs = trainer.observation(state, sensor=trainer._env_sensor)
     
     goal = command.goal()[1]
     with torch.no_grad():
@@ -145,7 +145,7 @@ def main() -> None:
       env.reset(env_ids=done_ids)
       new_state = trainer.extractor.state()[done_ids]
       new_context = trainer.extractor.context()[done_ids]
-      new_obs = trainer.observation(new_state)
+      new_obs = trainer.observation(new_state, sensor=trainer._env_sensor)
       
       trainer.last_action[done_ids] = 0.0
       ep_return[done_ids] = 0.0

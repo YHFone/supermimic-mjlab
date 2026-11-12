@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from mjlab.utils.lab_api.math import (
+  matrix_from_quat,
   quat_apply,
   quat_inv,
   quat_mul,
@@ -24,6 +25,7 @@ from mjlab.utils.lab_api.math import (
 )
 
 from .kinematics import DifferentiableKinematics
+from .representation import decompose_full_state
 
 TRACKING_REWARD_TERMS: tuple[str, ...] = (
   "root_pos",
@@ -92,11 +94,15 @@ def soft_termination_prob(
 def _quat_error_squared(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
   """Squared geodesic angle ``||log(R1^T R2)||^2`` (paper Eq. A.2).
 
-  ``dot`` is clamped away from one so that the ``acos`` gradient stays finite
-  when two orientations coincide in an imagined rollout.
+  Matches the official ``rotation_error_magnitude`` (``utils/helpers.py:108-127``):
+  ``trace(R1^T R2)`` is clamped to ``1 - 1e-7`` so ``acos`` keeps a finite
+  gradient when two orientations coincide in an imagined rollout.
   """
-  dot = torch.sum(q1 * q2, dim=-1).abs().clamp(max=1.0 - 1e-6)
-  return 4.0 * torch.acos(dot) ** 2
+  mat1 = matrix_from_quat(q1)
+  mat2 = matrix_from_quat(q2)
+  trace = torch.sum(mat1 * mat2, dim=(-2, -1))
+  cos_angle = ((trace - 1.0) / 2.0).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+  return torch.acos(cos_angle) ** 2
 
 
 class TrackingReward(nn.Module):
@@ -125,14 +131,17 @@ class TrackingReward(nn.Module):
     reference: dict[str, torch.Tensor],
   ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     num_joints = action.shape[-1]
+    root_pos, root_quat, joint_pos, root_lin_vel, root_ang_vel, joint_vel = (
+      decompose_full_state(state, num_joints)
+    )
     body_pos, body_quat, body_lin_vel, body_ang_vel = (
       self.kinematics.forward_with_velocity(
-        state[:, 0:3],
-        state[:, 3:7],
-        state[:, 7:10],
-        state[:, 10:13],
-        state[:, 13 : 13 + num_joints],
-        state[:, 13 + num_joints :],
+        root_pos,
+        root_quat,
+        root_lin_vel,
+        root_ang_vel,
+        joint_pos,
+        joint_vel,
       )
     )
     return self.forward_from_bodies(
@@ -160,7 +169,7 @@ class TrackingReward(nn.Module):
     """Reward from already-computed body poses and velocities."""
     cfg = self.cfg
     num_joints = action.shape[-1]
-    joint_pos = state[:, 13 : 13 + num_joints]
+    _, _, joint_pos, _, _, _ = decompose_full_state(state, num_joints)
     ids = self.tracked_body_indices
     body_pos = body_pos_all[:, ids]
     body_quat = body_quat_all[:, ids]
@@ -229,7 +238,6 @@ class TrackingReward(nn.Module):
       + cfg.action_rate_weight * action_rate
       + cfg.joint_limit_weight * joint_limit
     )
-    reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
     terms = {
       "root_pos": root_pos_term,
       "root_ori": root_ori_term,

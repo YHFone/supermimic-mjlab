@@ -36,6 +36,16 @@ class SuperMimicCfg:
   warmup_steps: int = 0
   """Extra collect-only steps before the loop (official starts at ``wm_window`` steps)."""
   action_noise: float = 0.1
+  actor_obs_mode: Literal["rep_state", "proprio"] = "rep_state"
+  """Actor input (official ``SupermimicRunnerCfg.actor_obs``).
+
+  ``rep_state`` (official default): the 68-dim GenCoord state, single frame, no
+  sensor noise.  ``proprio``: the 93-dim sensor observation with per-term
+  uniform noise (``representations.py:114,330-355``).
+  """
+  history_length: int = 1
+  """Actor sensor history.  ``>1`` needs the official frame-major ring, which
+  this port does not implement (``ValueError``)."""
 
   # Goal.
   goal_frames: int = 10
@@ -113,10 +123,17 @@ class SuperMimicCfg:
   """Capture the learner updates in a CUDA graph (official behaviour)."""
   compile: bool = False
   """Compile the differentiable-kinematics layer with ``torch.compile``."""
+  compile_world_model: bool = True
+  """Compile the world-model rollout + loss (official always does, ``wm_learner.py:70-72``)."""
   extra: dict = field(default_factory=dict)
 
   def __post_init__(self) -> None:
     if self.replay_ratio <= 0:
       raise ValueError("replay_ratio must be positive")
+    if self.history_length != 1:
+      raise ValueError(
+        "history_length > 1 requires the official frame-major observation ring "
+        "(representations.py:123-138); this port only implements history_length=1"
+      )
     if self.termination_softness <= 0:
       raise ValueError("termination_softness must be positive")

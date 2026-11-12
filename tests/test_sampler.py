@@ -45,3 +45,9 @@ def test_record_updates_value_and_returns_distribution():
   assert refreshed
   # The visited bin's value must move away from the v_max initialization.
   assert (sampler.value != sampler.v_max).any()
+
+
+def test_bin_count_matches_official_formula():
+  """``int(T // (1 / step_dt)) + 1`` bins of one second (not ``round(T * dt)``)."""
+  sampler = ReturnSampler(torch.tensor([6574]), 0.02, "cpu", num_envs=1)
+  assert sampler.bin_count == int(6574 // 50) + 1 == 132
