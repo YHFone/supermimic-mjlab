@@ -937,6 +937,7 @@ class SuperMimicTrainer:
     window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
     window_rounds = 0.0
     window_iters = 0
+    window_iters = 0
     window_start = time.time()
     while self.iteration < cfg.num_iterations:
       logs: dict[str, float] = {}
@@ -972,26 +973,31 @@ class SuperMimicTrainer:
         else:
           window_metrics[key] = value
       window_rounds += train_rounds
+      window_iters += 1
 
       # Official phase: ``step % interval == 0`` with ``step`` starting at 0, so
       # the first log and the first save both happen at step 0
       # (``supermimic_runner.py:726-748``).
       step = self.iteration - 1
       if cfg.log_interval > 0 and step % cfg.log_interval == 0:
-        merged = {**window_metrics, **window_time, "train/rounds": window_rounds}
-        # Official: ``iteration_time = collect + wm_learn + policy_learn``
-        # (``utils/logger.py:189``).  All three are totals over the log window,
-        # so the three lines add up to the printed iteration time.  Passing the
-        # last iteration's wall time instead made them look inconsistent.
-        window_elapsed = (
-          merged["time/collect"]
-          + merged["time/world_model"]
-          + merged["time/policy"]
+        # The three timers accumulate over the log window; report them per
+        # iteration so they reconcile with "Iteration time"
+        # (official: ``iteration_time = collect + wm_learn + policy_learn``,
+        # ``utils/logger.py:189`` — there they are window totals, which is why
+        # their log shows ~2 s for a 10-iteration window).
+        n_iters = max(1, window_iters)
+        averaged = {key: value / n_iters for key, value in window_time.items()}
+        merged = {**window_metrics, **averaged, "train/rounds": window_rounds}
+        self._log_iteration(
+          merged,
+          averaged["time/collect"]
+          + averaged["time/world_model"]
+          + averaged["time/policy"],
         )
-        self._log_iteration(merged, window_elapsed)
         window_metrics.clear()
         window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
         window_rounds = 0.0
+        window_iters = 0
       if cfg.save_interval > 0 and step % cfg.save_interval == 0:
         self.save()
 
@@ -1056,9 +1062,9 @@ class SuperMimicTrainer:
       f"{f' Learning iteration {it}/{total} ':^{width}}\n\n",
       line("Total steps", f"{self.env_steps:,}"),
       line("Steps per second", f"{fps:.0f}"),
-      line("Collection time (avg)", f"{g('time/collect'):.3f}s"),
-      line("World-model time (avg)", f"{g('time/world_model'):.3f}s"),
-      line("Policy time (avg)", f"{g('time/policy'):.3f}s"),
+      line("Collection time", f"{g('time/collect'):.3f}s"),
+      line("WM Learning time", f"{g('time/world_model'):.3f}s"),
+      line("Policy Learning time", f"{g('time/policy'):.3f}s"),
       line("Mean world model loss", f"{g('world_model/loss'):.4f}"),
       line(
         "Mean world model 7-step error",
@@ -1078,7 +1084,7 @@ class SuperMimicTrainer:
       line("Mean reward per step", f"{mean_step_reward:.4f}"),
       line("Mean action std", f"{mean_action_std:.4f}"),
       line("Success rate", success_rate),
-      line("Training rounds (window)", f"{int(g('train/rounds'))}"),
+      line("Training rounds", f"{int(g('train/rounds'))}"),
       line("Done rate", f"{g('collect/done_rate'):.4f}"),
       line("Bad gradients", f"{int(g('policy/bad_grads'))}"),
       line("Learning rate", f"{self.actor_optimizers[0].param_groups[0]['lr']:.2e}"),
@@ -1093,7 +1099,7 @@ class SuperMimicTrainer:
     lines.extend(
       [
         f"{'-' * width}\n",
-        line("Iteration time (avg)", f"{iteration_time:.3f}s"),
+        line("Iteration time", f"{iteration_time:.2f}s"),
         line("Time elapsed", time.strftime("%H:%M:%S", time.gmtime(elapsed))),
         line(
           "ETA",
