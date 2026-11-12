@@ -937,13 +937,10 @@ class SuperMimicTrainer:
     window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
     window_rounds = 0.0
     window_iters = 0
-    window_iters = 0
     window_start = time.time()
     while self.iteration < cfg.num_iterations:
       logs: dict[str, float] = {}
-      t_collect = time.perf_counter()
       logs.update(self._collect(1))
-      t_after_collect = time.perf_counter()
       train_rounds = 0
       # Time each phase where it runs: with a fractional ratio a round fires on
       # only some iterations, so a single bracket around the loop would bill the
@@ -961,7 +958,6 @@ class SuperMimicTrainer:
         policy_seconds += time.perf_counter() - t1
         train_rounds += 1
       logs["train/rounds"] = float(train_rounds)
-      logs["time/collect"] = t_after_collect - t_collect
       logs["time/world_model"] = wm_seconds
       logs["time/policy"] = policy_seconds
       self._set_lr(self.iteration)
@@ -980,24 +976,28 @@ class SuperMimicTrainer:
       # (``supermimic_runner.py:726-748``).
       step = self.iteration - 1
       if cfg.log_interval > 0 and step % cfg.log_interval == 0:
-        # The three timers accumulate over the log window; report them per
-        # iteration so they reconcile with "Iteration time"
-        # (official: ``iteration_time = collect + wm_learn + policy_learn``,
-        # ``utils/logger.py:189`` — there they are window totals, which is why
-        # their log shows ~2 s for a 10-iteration window).
-        n_iters = max(1, window_iters)
-        averaged = {key: value / n_iters for key, value in window_time.items()}
-        merged = {**window_metrics, **averaged, "train/rounds": window_rounds}
-        self._log_iteration(
-          merged,
-          averaged["time/collect"]
-          + averaged["time/world_model"]
-          + averaged["time/policy"],
+        # Official accounting: collect is the window remainder, so the three
+        # parts sum to the window's wall time
+        # (``supermimic_runner.py:736-743``; ``iteration_time`` is their sum,
+        # ``utils/logger.py:189``).  We then divide by the iteration count so
+        # the printed numbers are per iteration and match "Iteration time"
+        # instead of being a ``log_interval``-long window total.
+        timings = window_timings(
+          time.time() - window_start,
+          window_time["time/world_model"],
+          window_time["time/policy"],
         )
+        n_iters = max(1, window_iters)
+        averaged = {key: value / n_iters for key, value in timings.items()}
+        merged = {**window_metrics, **averaged, "train/rounds": window_rounds}
+        self._log_iteration(merged, sum(averaged.values()))
         window_metrics.clear()
         window_time = {"time/collect": 0.0, "time/world_model": 0.0, "time/policy": 0.0}
         window_rounds = 0.0
         window_iters = 0
+        # Start the next window after the log itself, matching the official
+        # runner (``start_time = time.time()`` right after ``logger.log``).
+        window_start = time.time()
       if cfg.save_interval > 0 and step % cfg.save_interval == 0:
         self.save()
 

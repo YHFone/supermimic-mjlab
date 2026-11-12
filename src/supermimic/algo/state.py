@@ -30,6 +30,8 @@ import mujoco
 import torch
 from torch import nn
 
+from supermimic.mdp.features import make_state
+
 from .kinematics import DifferentiableKinematics, build_kinematic_tree
 
 if TYPE_CHECKING:
@@ -251,17 +253,19 @@ class StateExtractor:
     return self.env.scene.env_origins
 
   def state(self) -> torch.Tensor:
+    """Full state in the official column order.
+
+    Delegates to :func:`make_state` so the layout has exactly one definition; a
+    mismatch here silently scrambles every consumer (representation, FK, reward).
+    """
     data = self.robot.data
-    return torch.cat(
-      [
-        data.root_link_pos_w - self.origins,
-        data.root_link_quat_w,
-        data.root_link_lin_vel_w,
-        data.root_link_ang_vel_w,
-        data.joint_pos,
-        data.joint_vel,
-      ],
-      dim=-1,
+    return make_state(
+      data.root_link_pos_w - self.origins,
+      data.root_link_quat_w,
+      data.root_link_lin_vel_w,
+      data.root_link_ang_vel_w,
+      data.joint_pos,
+      data.joint_vel,
     )
 
   def context(self) -> torch.Tensor:
